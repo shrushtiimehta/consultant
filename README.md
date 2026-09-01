@@ -333,6 +333,63 @@ center of the screen. It opens a new window from which you can chat with the age
 5. If you want to make modifications, go back to the editor window and ask for changes.
 6. You can also edit any agent network by clicking the pen icon next to its name in the main window.
 
+### Network Consultant
+
+Given a network and a set of test fixtures, the Network Consultant iteratively runs them and fixes
+whatever fails — wrong agent instructions, bad fixture expectations, or (when asked) structural
+simplification — via `registries/agent_network_consultant.hocon`, driven from the nsflow UI panel or
+the `apps/network_consultant` CLI runner.
+
+The UI panel below needs the patched `nsflow` from [Install from source](#install-from-source-with-network-consultant),
+not the plain PyPI package — it won't appear otherwise. The CLI runner has no such requirement.
+Both need the one-time `registries/generated/` setup from that same section.
+
+#### UI
+
+1. Pick the network to work on from the agent list, then open the **Network Consultant** panel.
+2. Pick a Test Level (Minimal/Normal/Max) and click **Generate** to create test fixtures, or **View**
+   to inspect/hand-edit the ones already there.
+3. Click **Improve Network** to start the iterative test-and-fix loop.
+4. Watch progress in the LogsPanel and the pass-rate chart. If the run stops on a
+   **NEEDS_CLARIFICATION** question, answer it inline to resume; a **TOOL_ISSUE** means a broken
+   coded tool needs a human code fix — no amount of retrying will clear it.
+5. **Stop** cancels a running job.
+
+Backing routes: `POST /api/v1/network_consultant/generate-tests`, `POST .../improve`,
+`GET .../jobs/{job_id}`, `POST .../jobs/{job_id}/answer`, `POST .../jobs/{job_id}/stop`.
+
+#### CLI
+
+For unattended runs. It does not appear in the nsflow live view and cannot answer a
+NEEDS_CLARIFICATION question mid-run — use the UI for that.
+
+```bash
+python -m apps.network_consultant.runner \
+  --hocon-file basic/coffee_finder.hocon \
+  --direction "Name the exact open venues for coffee or coffee-liquor requests, based on the time of day" \
+  --test-level normal
+```
+
+`--hocon-file` is relative to `registries/`; the network must already be listed in
+`registries/manifest.hocon` to be served. Use `--use-case "..."` instead to have the Agent Network
+Designer build a brand-new network first.
+
+| Flag | Meaning |
+| --- | --- |
+| `--test-level {minimum,normal,max}` | How many fixtures ANTeGen generates. |
+| `--max-iterations N` | Cap on test-and-fix rounds. |
+| `--success-ratio N/M` | Ratio a fixture is bumped to once the fix is judged confident (default `3/3`). |
+| `--connection {direct,http}` | `direct` (default) runs in-process, no server. `http` talks to a running `ns run`. |
+| `--git-versions` | Push a hocon snapshot after each meaningful checkpoint to its own branch (see below). |
+
+Don't run more than one of these processes concurrently against the same repo — they share
+`registries/generated/manifest.hocon`, and concurrent writes can race.
+
+`--git-versions` (or the UI's matching checkbox) pushes each snapshot to whichever remote is
+configured under the name `network-consultant-versions` — run `git remote -v` to see exactly
+where that is. Override it with the `NETWORK_CONSULTANT_GIT_VERSIONS_REMOTE` env var before the
+first run if you want snapshots to go somewhere else.
+
 ### Import a project from a file / Export to a file
 
 You can import a project from a .hocon file or from a zip file using the `ns import <PATH>`.
@@ -366,6 +423,80 @@ See [`docs/cli/export.md`](docs/cli/export.md) for details.
 <!-- pyml enable line-length -->
 
 Use `ns <command> --help` for the full flag list of any subcommand.
+
+---
+
+## Install from source (with Network Consultant)
+
+The [Install](#install) section above sets up `neuro-san-studio` as a dependency of a new project of
+your own — the right path for using the framework. Use this path instead if you're working from a
+checkout of this repository itself, which is also the only way to get the Network Consultant tooling:
+it isn't in the released `neuro-san-studio` or `nsflow` packages yet.
+
+### 1. Clone this repository and its dependencies
+
+```bash
+git clone https://github.com/your-username/neuro-san-studio.git
+cd neuro-san-studio
+make install               # creates venv/, installs requirements.txt + requirements-build.txt into it
+source venv/bin/activate
+```
+
+Windows has no `make`; see [CONTRIBUTING.md](CONTRIBUTING.md#development-environment-setup) for the
+equivalent manual `venv` + `pip install` steps.
+
+Every dependency this pulls in (`neuro-san`, `nsflow`, etc.) is a normal release from PyPI — this step
+alone gets you the same `neuro-san-studio` as [Install](#install), just running from source instead of
+as a dependency. The two steps below are what add the Network Consultant tooling on top.
+
+### 2. Point Python at this checkout, not site-packages
+
+`ns` and its libraries would otherwise resolve `coded_tools`, `middleware`, and `neuro_san_studio`
+itself from whatever release `make install` just pulled in, silently ignoring everything this checkout
+adds locally (the Network Consultant network, its coded tools, etc.):
+
+```bash
+export PYTHONPATH=$(pwd)   # repeat this in every new shell before running anything below
+```
+
+### 3. Clone and install the patched `nsflow`
+
+The Network Consultant panel, its live progress chart, and mid-run clarification answers all live in a
+fork of `nsflow` that step 1's release doesn't have. Clone it into this checkout and install it
+editable, so it's what Python actually imports:
+
+```bash
+git clone -b network-consultant-compat https://github.com/shrushtiimehta/nsflow.git
+pip install -e ./nsflow
+```
+
+Confirm it took:
+
+```bash
+python -c "import nsflow; print(nsflow.__file__)"
+# must point inside ./nsflow -- if it says .../site-packages/nsflow, the -e install didn't win
+```
+
+### 4. Credentials and one-time local registry setup
+
+Set your LLM key(s) as in [Set your LLM API key(s)](#set-your-llm-api-keys) above. Then, since
+`registries/generated/` isn't tracked in git, create it once — both the Agent Network Designer and the
+Network Consultant write newly generated/modified networks there:
+
+```bash
+mkdir -p registries/generated && echo '{}' > registries/generated/manifest.hocon
+```
+
+### 5. Run it
+
+```bash
+export PYTHONPATH=$(pwd)   # if this is a new shell
+ns run
+```
+
+Same result as [Start the developer UI](#start-the-developer-ui) above — neuro-san on `:8080`, nsflow
+on `:4173`. Open <http://localhost:4173>, pick a network, and you'll now also see the **Network
+Consultant** panel — see [Network Consultant](#network-consultant) above for how to use it.
 
 ---
 

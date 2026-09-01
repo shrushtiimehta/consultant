@@ -23,6 +23,7 @@ from neuro_san.internals.graph.activations.branch_activation import BranchActiva
 from neuro_san.message.parsers.structure.json_structure_parser import JsonStructureParser
 
 from coded_tools.agent_network_editor.and_logger import AndLogger
+from coded_tools.agent_network_editor.constants import AGENT_NETWORK_CHANGES
 from coded_tools.agent_network_editor.constants import AGENT_NETWORK_DEFINITION
 from coded_tools.agent_network_editor.progress_handler import ProgressHandler
 from neuro_san_studio.coded_tools.coded_tool_agent_caller import CodedToolAgentCaller
@@ -211,7 +212,12 @@ class WriteAllInstructions(BranchActivation, CodedTool):
             the existing text through the model. An empty object is the
             writer's documented no-op ("no change needed") and succeeds
             without writing anything.
-        :param sly_data: Carries the agent_network_definition to update.
+        :param sly_data: Carries the agent_network_definition to update. Also gains/extends
+            AGENT_NETWORK_CHANGES ({agent_name: {field: value}}) for every field actually
+            written, so source-preserving persistence (see
+            AgentNetworkPersistenceMiddleware.preserve_source_hocon) knows exactly what to
+            patch without rebuilding the whole file. Callers that don't use that persistence
+            mode simply never read this key -- purely additive.
         :return: "" on success, or an "Error: ..." string.
         """
         network_def: dict[str, Any] = sly_data.get(AGENT_NETWORK_DEFINITION)
@@ -232,8 +238,10 @@ class WriteAllInstructions(BranchActivation, CodedTool):
             logger.info("Writer reported no change needed for '%s'", agent_name)
             return ""
 
+        changes: dict[str, dict[str, str]] = sly_data.setdefault(AGENT_NETWORK_CHANGES, {})
         for field, value in updates.items():
             network_def[agent_name][field] = value
+            changes.setdefault(agent_name, {})[field] = value
             logger.info("Set %s for '%s' (%d chars)", field, agent_name, len(value))
 
         sly_data[AGENT_NETWORK_DEFINITION] = network_def

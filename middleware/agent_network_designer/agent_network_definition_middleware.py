@@ -48,6 +48,7 @@ from coded_tools.agent_network_editor.and_logger import AndLogger
 from coded_tools.agent_network_editor.connectivity_dictionary_converter import ConnectivityDictionaryConverter
 from coded_tools.agent_network_editor.constants import AGENT_NETWORK_DEFINITION
 from coded_tools.agent_network_editor.constants import AGENT_NETWORK_NAME
+from coded_tools.agent_network_editor.constants import AGENT_NETWORK_SOURCE_FILE
 from coded_tools.agent_network_editor.progress_handler import ProgressHandler
 from coded_tools.agent_network_editor.sly_data_lock import SlyDataLock
 from middleware.agent_network_designer.persistence.file_system_agent_network_persistor import DEFAULT_REGISTRIES_DIR
@@ -252,6 +253,12 @@ class AgentNetworkDefinitionMiddleware(AgentMiddleware):
             # This is because the agent network name is only created when using the CreateNetwork tool.
             if network_def:
                 self.sly_data[AGENT_NETWORK_NAME] = Path(hocon_file).stem
+                # Retain the resolved path too -- source-preserving persistence (see
+                # AgentNetworkPersistenceMiddleware.preserve_source_hocon) writes back to this
+                # exact file rather than reassembling one from AGENT_NETWORK_NAME.
+                source_file: str | None = self._resolve_hocon_path(hocon_file)
+                if source_file:
+                    self.sly_data[AGENT_NETWORK_SOURCE_FILE] = source_file
             return network_def
 
         # Lastly, check the reservation ID in agent reservation field in sly data.

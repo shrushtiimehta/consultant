@@ -1,0 +1,1 @@
+okay so i had made a few changes before but idk everything went to shit, i'm starting again, make sure everything you do is accurate as fuck. dont do extra shit, do only what i ask you to do. also DO NOT reinvent the wheel. try re using as much as you can.

@@ -14,6 +14,7 @@
 #
 # END COPYRIGHT
 
+import asyncio
 from logging import getLogger
 from os import environ
 from typing import Any
@@ -28,9 +29,11 @@ from neuro_san.internals.validation.network.unreachable_nodes_network_validator 
 
 from coded_tools.agent_network_editor.and_logger import AndLogger
 from coded_tools.agent_network_editor.connectivity_dictionary_converter import ConnectivityDictionaryConverter
+from coded_tools.agent_network_editor.constants import AGENT_NETWORK_CHANGES
 from coded_tools.agent_network_editor.constants import AGENT_NETWORK_DEFINITION
 from coded_tools.agent_network_editor.constants import AGENT_NETWORK_HOCON_TEXT
 from coded_tools.agent_network_editor.constants import AGENT_NETWORK_NAME
+from coded_tools.agent_network_editor.constants import AGENT_NETWORK_SOURCE_FILE
 from coded_tools.agent_network_editor.get_mcp_tool import GetMcpTool
 from coded_tools.agent_network_editor.get_subnetwork import GetSubnetwork
 from coded_tools.agent_network_editor.mcp_header_hygiene import McpHeaderHygiene
@@ -42,6 +45,7 @@ from middleware.agent_network_designer.persistence.agent_network_persistor impor
 from middleware.agent_network_designer.persistence.agent_network_persistor_factory import AgentNetworkPersistorFactory
 from middleware.agent_network_designer.persistence.file_system_agent_network_persistor import DEFAULT_SUBDIRECTORY
 from middleware.agent_network_designer.persistence.hocon_agent_network_assembler import HoconAgentNetworkAssembler
+from middleware.agent_network_designer.persistence.source_preserving_hocon_editor import SourcePreservingHoconEditor
 from middleware.agent_network_designer.validation.agent_network_instructions_validation_middleware import (
     AgentNetworkInstructionsValidationMiddleware,
 )
@@ -83,7 +87,13 @@ class AgentNetworkPersistenceMiddleware(AgentMiddleware):
     we catch those premature completions and force the agent to correct itself.
     """
 
-    def __init__(self, reservationist: Reservationist, sly_data: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        reservationist: Reservationist,
+        sly_data: dict[str, Any],
+        persist_only_when_modified: bool = False,
+        preserve_source_hocon: bool = False,
+    ) -> None:
         """
         Initialize agent network persistence middleware.
 
@@ -100,10 +110,17 @@ class AgentNetworkPersistenceMiddleware(AgentMiddleware):
 
                 Keys expected for this implementation are:
                     "agent_network_definition": an outline of an agent network
+        :param persist_only_when_modified: If True, skip validation and persistence entirely
+                when AGENT_NETWORK_CHANGES is empty -- nothing to write, so nothing to check.
+        :param preserve_source_hocon: If True, persist by patching only the changed
+                instructions/description fields into the exact source HOCON (see
+                _persist_source_changes) instead of reassembling the whole file.
         """
         self.logger: AndLogger = AndLogger(getLogger(self.__class__.__name__))
         self.reservationist = reservationist
         self.sly_data = sly_data
+        self.persist_only_when_modified = persist_only_when_modified
+        self.preserve_source_hocon = preserve_source_hocon
         # Maximum number of validation retry rounds before bailing without persisting.
         # Parsed per-instance so a bad env var degrades this one session, not the whole server.
         raw_max: str = environ.get(
@@ -127,6 +144,8 @@ class AgentNetworkPersistenceMiddleware(AgentMiddleware):
     # https://reference.langchain.com/python/langchain/agents/middleware/types/hook_config for details on
     # hook_config and jump_to.
     @hook_config(can_jump_to=["model"])
+    # Validation, retry, and the two persistence policies intentionally converge in this lifecycle hook.
+    # pylint: disable=too-many-branches
     async def aafter_agent(self, state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
         """
         Validate and persist the agent network after the agent finishes.
@@ -147,6 +166,9 @@ class AgentNetworkPersistenceMiddleware(AgentMiddleware):
         """
         network_def: dict[str, Any] = self.sly_data.get(AGENT_NETWORK_DEFINITION)
         agent_network_name: str = self.sly_data.get(AGENT_NETWORK_NAME)
+        changes: dict[str, dict[str, str]] = self.sly_data.get(AGENT_NETWORK_CHANGES, {})
+        if self.persist_only_when_modified and not changes:
+            return None
         # Only validate and persist if there is an agent_network_definition with a valid name; otherwise let
         # the agent respond to the user freely. This allows the agent to ask clarifying questions or report
         # issues without being forced to produce a network definition — for example, when
@@ -175,20 +197,35 @@ class AgentNetworkPersistenceMiddleware(AgentMiddleware):
                 )
                 message_parts: list[str] = []
                 if structure_errors:
-                    message_parts.append(
-                        f"The agent network definition has structural issues: {structure_errors}. "
-                        "Call `agent_network_editor` to fix these structural problems."
-                    )
+                    if self.preserve_source_hocon:
+                        message_parts.append(
+                            f"The agent network definition has structural issues: {structure_errors}. Do not rewrite "
+                            "the source automatically; report `STRUCTURAL_CHANGE_REQUIRED` with the reason."
+                        )
+                    else:
+                        message_parts.append(
+                            f"The agent network definition has structural issues: {structure_errors}. "
+                            "Call `agent_network_editor` to fix these structural problems."
+                        )
                 if instructions_errors:
+                    instructions_tool = (
+                        "write_all_instructions" if self.preserve_source_hocon else "agent_network_instructions_editor"
+                    )
                     message_parts.append(
                         f"The agent network definition has instructions-related issues: {instructions_errors}. "
-                        "Call `agent_network_instructions_editor` to fix these instructions problems."
+                        f"Call `{instructions_tool}` to fix these instructions problems."
                     )
                 if structure_errors and instructions_errors:
-                    message_parts.append(
-                        "Fix the structural issues first by calling `agent_network_editor`, "
-                        "then address the instructions issues with `agent_network_instructions_editor`."
-                    )
+                    if self.preserve_source_hocon:
+                        message_parts.append(
+                            "Do not persist a partial repair while structural issues remain; report the structural "
+                            "handoff instead."
+                        )
+                    else:
+                        message_parts.append(
+                            "Fix the structural issues first by calling `agent_network_editor`, "
+                            "then address the instructions issues with `agent_network_instructions_editor`."
+                        )
                 return self._error_response(" ".join(message_parts))
 
             # Validation succeeded. Reset the counter so a later turn in the same session
@@ -197,7 +234,10 @@ class AgentNetworkPersistenceMiddleware(AgentMiddleware):
 
             sample_queries: list[str] = self.sly_data.get(AGENT_NETWORK_QUERIES, [])
 
-            await self._assemble_and_persist(network_def, agent_network_name, sample_queries)
+            if self.preserve_source_hocon:
+                await self._persist_source_changes(changes)
+            else:
+                await self._assemble_and_persist(network_def, agent_network_name, sample_queries)
 
             agent_progress_style: str = environ.get("AGENT_NETWORK_DESIGNER_PROGRESS_STYLE", "internal")
 
@@ -215,6 +255,17 @@ class AgentNetworkPersistenceMiddleware(AgentMiddleware):
             self.logger.debug(">>>>>>>>>>>>>>>>>>> DONE %s !!!>>>>>>>>>>>>>>>>>>", self.__class__.__name__)
 
         return None
+
+    async def _persist_source_changes(self, changes: dict[str, dict[str, str]]) -> None:
+        """Patch changed fields in the exact source HOCON without rebuilding unrelated configuration."""
+        source_file: str = self.sly_data.get(AGENT_NETWORK_SOURCE_FILE, "")
+        if not source_file:
+            raise ValueError("Cannot preserve source HOCON: no agent_network_source_file is available.")
+
+        updated_text = await asyncio.to_thread(SourcePreservingHoconEditor.update_file, source_file, changes)
+        self.sly_data[AGENT_NETWORK_HOCON_TEXT] = updated_text
+        self.sly_data[AGENT_NETWORK_CHANGES] = {}
+        self.logger.info("Persisted surgical agent-network changes to %s", source_file)
 
     def _error_response(self, content: str) -> dict[str, Any]:
         """Return a jump-to-model response with the given error content."""

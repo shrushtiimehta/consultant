@@ -191,7 +191,7 @@ IMPORTANT: Only the keys shown above are allowed at the top level. Do NOT add `n
 
 Each interaction in the list must have ONLY these keys:
 - `text`: the user message to send to the agent. Must be a natural user query only. Do NOT add instructional phrases like "Respond with JSON" or "Respond with the required JSON keys".
-- `timeout_in_seconds`: 60-180 for simple interactions, 300-500 for complex ones.
+- `timeout_in_seconds`: 300-500. Never below 300, even for simple interactions.
 - `response`: describes how to verify the agent's reply.
 - `sly_data` (optional): private data if the agent uses sly_data.
 Do NOT add `name`, `description`, or any other key to interactions.
