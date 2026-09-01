@@ -18,6 +18,7 @@ import asyncio
 import json
 import os
 import re
+from copy import deepcopy
 from json import JSONDecodeError
 from logging import getLogger
 from pathlib import Path
@@ -42,12 +43,20 @@ from langchain_core.messages import SystemMessage
 from leaf_common.resolution.resolver_util import ResolverUtil
 from neuro_san.interfaces.agent_progress_reporter import AgentProgressReporter
 from neuro_san.internals.persistence.abstract_async_config_restorer import AbstractAsyncConfigRestorer
+from pyhocon import ConfigFactory
+from pyhocon.config_tree import ConfigQuotedString
+from pyhocon.config_tree import ConfigSubstitution
+from pyhocon.config_tree import ConfigTree
+from pyhocon.config_tree import ConfigValues
+from pyhocon.exceptions import ConfigException
 from pyparsing.exceptions import ParseException
 
 from coded_tools.agent_network_editor.and_logger import AndLogger
 from coded_tools.agent_network_editor.connectivity_dictionary_converter import ConnectivityDictionaryConverter
 from coded_tools.agent_network_editor.constants import AGENT_NETWORK_DEFINITION
+from coded_tools.agent_network_editor.constants import AGENT_NETWORK_DIAGNOSTIC_CONTEXT
 from coded_tools.agent_network_editor.constants import AGENT_NETWORK_NAME
+from coded_tools.agent_network_editor.constants import AGENT_NETWORK_SOURCE_FILE
 from coded_tools.agent_network_editor.progress_handler import ProgressHandler
 from coded_tools.agent_network_editor.sly_data_lock import SlyDataLock
 from middleware.agent_network_designer.persistence.file_system_agent_network_persistor import DEFAULT_REGISTRIES_DIR
@@ -252,6 +261,9 @@ class AgentNetworkDefinitionMiddleware(AgentMiddleware):
             # This is because the agent network name is only created when using the CreateNetwork tool.
             if network_def:
                 self.sly_data[AGENT_NETWORK_NAME] = Path(hocon_file).stem
+                source_file = self._resolve_hocon_path(hocon_file)
+                if source_file:
+                    self.sly_data[AGENT_NETWORK_SOURCE_FILE] = source_file
             return network_def
 
         # Lastly, check the reservation ID in agent reservation field in sly data.
@@ -467,8 +479,9 @@ class AgentNetworkDefinitionMiddleware(AgentMiddleware):
         :param network_def: The agent network definition dictionary
         :return: Formatted prompt string
         """
-        definition_str: str = json.dumps(network_def, indent=2)
-        return f"## Current Agent Network Definition\n\n```json\n{definition_str}\n```"
+        diagnostic_context = self.sly_data.get(AGENT_NETWORK_DIAGNOSTIC_CONTEXT, network_def)
+        definition_str: str = json.dumps(diagnostic_context, indent=2)
+        return f"## Current Agent Network Diagnostic Context\n\n```json\n{definition_str}\n```"
 
     async def _hocon_to_definition(self, network_hocon_file: str | None) -> dict[str, Any] | None:
         """
@@ -480,7 +493,143 @@ class AgentNetworkDefinitionMiddleware(AgentMiddleware):
         config: dict[str, Any] | None = await self._hocon_to_config(network_hocon_file)
         if config is None:
             return None
-        return await self._config_to_network_def(config, network_hocon_file)
+        network_def = await self._config_to_network_def(config, network_hocon_file)
+        if network_def is not None:
+            await self._apply_unresolved_instructions(network_def, network_hocon_file)
+            self.sly_data[AGENT_NETWORK_DIAGNOSTIC_CONTEXT] = self._build_diagnostic_context(config, network_def)
+        return network_def
+
+    async def _apply_unresolved_instructions(self, network_def: dict[str, Any], network_hocon_file: str | None) -> None:
+        """
+        Replace each agent's instructions with the source literal, minus any ${...} substitution.
+
+        The normal parse expands ${aaosa_instructions} / ${expertise_scoping_instructions} inline, so
+        the editor reads shared boilerplate as if it were the agent's own text -- and then copies it
+        forward into whatever it writes. In the source those substitutions are separate tokens
+        concatenated OUTSIDE the quoted string, so re-parsing with resolve=False lets us keep the
+        quoted part and drop them structurally: no text matching, and no dependence on which aaosa
+        variant a given network happens to include.
+
+        The hocon on disk is untouched -- nsflow and the runtime still load it resolved, with the
+        variables expanded as usual. This only changes what the editor reads.
+
+        Best-effort: if the unresolved parse fails, the already-resolved instructions are left in
+        place rather than failing the load.
+
+        :param network_def: Agent network definition to patch in place
+        :param network_hocon_file: Agent network hocon file path
+        """
+        file_reference: str | None = self._resolve_hocon_path(network_hocon_file)
+        if file_reference is None:
+            return
+
+        try:
+            # basedir="." to match the cwd-relative include paths these registries use
+            # (e.g. include "registries/aaosa.hocon"). With resolve=False an unreadable include
+            # only warns, so the agent literals still come back intact either way.
+            unresolved: ConfigTree = ConfigFactory.parse_string(
+                Path(file_reference).read_text(encoding="utf-8"), basedir=".", resolve=False
+            )
+            agents: Any = unresolved.get("tools", [])
+        except (OSError, ConfigException, ParseException) as error:
+            self.logger.warning(
+                "WARNING: Could not re-read '%s' unresolved; instructions may contain expanded "
+                "substitutions. %s",
+                file_reference,
+                error,
+            )
+            return
+
+        if not isinstance(agents, list):
+            return
+
+        for agent in agents:
+            if not isinstance(agent, ConfigTree):
+                continue
+            agent_name: Any = agent.get("name", None)
+            # Only touch agents that already came through with instructions -- function/toolbox
+            # agents have none, and must keep not having the key.
+            if not isinstance(agent_name, str) or agent_name not in network_def:
+                continue
+            if network_def[agent_name].get("instructions") is None:
+                continue
+            literal: str | None = self._literal_without_substitutions(agent.get("instructions", None))
+            if literal:
+                # Run through the same extractor the resolved path uses, so demo-mode text and the
+                # legacy prefix still get removed and whitespace is normalized identically. Its
+                # aaosa/expertise replacements simply find nothing left to strip.
+                network_def[agent_name]["instructions"] = await self._extract_custom_instructions(literal)
+
+    @staticmethod
+    def _literal_without_substitutions(value: Any) -> str | None:
+        """
+        Return a value's source text with its ${...} substitution tokens dropped.
+
+        A HOCON value built by concatenating strings and substitutions parses (unresolved) into a
+        ConfigValues holding one token per part: plain str for triple-quoted blocks,
+        ConfigQuotedString for "..." and ConfigSubstitution for each ${...}.
+
+        :param value: An unresolved parsed value
+        :return: The concatenated literal parts, or None if there are none
+        """
+        if isinstance(value, str):
+            return value
+        if not isinstance(value, ConfigValues):
+            return None
+
+        parts: list[str] = []
+        for token in value.tokens:
+            if isinstance(token, ConfigSubstitution):
+                continue
+            if isinstance(token, ConfigQuotedString):
+                parts.append(token.value)
+            elif isinstance(token, str):
+                parts.append(token)
+
+        return "".join(parts).strip() or None
+
+    @classmethod
+    def _build_diagnostic_context(cls, config: dict[str, Any], network_def: dict[str, Any]) -> dict[str, Any]:
+        """Build a complete but redacted view of fields relevant to failure diagnosis."""
+        omitted_root_keys = {
+            "aaosa_call",
+            "aaosa_command",
+            "aaosa_instructions",
+            "demo_mode",
+            "instructions_prefix",
+            "pii_patterns",
+            "tools",
+        }
+        context = {key: deepcopy(value) for key, value in config.items() if key not in omitted_root_keys}
+        diagnostic_agents = []
+        for raw_agent in config.get("tools", []):
+            if not isinstance(raw_agent, dict):
+                diagnostic_agents.append(deepcopy(raw_agent))
+                continue
+            agent = deepcopy(raw_agent)
+            agent_name = agent.get("name")
+            if agent_name in network_def and "instructions" in agent:
+                agent["instructions"] = network_def[agent_name].get("instructions", "")
+            diagnostic_agents.append(agent)
+        context["tools"] = diagnostic_agents
+        return cls._redact_sensitive_values(context)
+
+    @classmethod
+    def _redact_sensitive_values(cls, value: Any, key_name: str = "") -> Any:
+        """Redact secret-bearing keys and common credential-shaped string values recursively."""
+        if re.search(r"(?:api[_-]?key|authorization|credential|password|secret|token)", key_name, re.IGNORECASE):
+            return "[REDACTED]"
+        if isinstance(value, dict):
+            return {key: cls._redact_sensitive_values(item, str(key)) for key, item in value.items()}
+        if isinstance(value, list):
+            return [cls._redact_sensitive_values(item, key_name) for item in value]
+        if isinstance(value, str) and re.search(
+            r"(?:sk-(?:proj-)?[A-Za-z0-9_-]{16,}|AIza[0-9A-Za-z_-]{35}|gh[pousr]_[A-Za-z0-9]+|"
+            r"xox[baprs]-[A-Za-z0-9-]+|Bearer\s+[A-Za-z0-9._~+/=-]{20,})",
+            value,
+        ):
+            return "[REDACTED]"
+        return value
 
     def _resolve_hocon_path(self, network_hocon_file: str | None) -> str | None:
         """

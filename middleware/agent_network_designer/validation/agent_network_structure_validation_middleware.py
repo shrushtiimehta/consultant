@@ -20,6 +20,7 @@ from neuro_san.internals.validation.network.structure_network_validator import S
 from neuro_san.internals.validation.network.toolbox_network_validator import ToolboxNetworkValidator
 from neuro_san.internals.validation.network.url_network_validator import UrlNetworkValidator
 
+from coded_tools.agent_network_editor.constants import AGENT_NETWORK_DIAGNOSTIC_CONTEXT
 from coded_tools.agent_network_editor.get_mcp_tool import GetMcpTool
 from coded_tools.agent_network_editor.get_subnetwork import GetSubnetwork
 from coded_tools.agent_network_editor.get_toolbox import GetToolbox
@@ -75,6 +76,19 @@ class AgentNetworkStructureValidationMiddleware(AgentNetworkValidationMiddleware
             if url not in mcp_servers:
                 mcp_servers.append(url)
         toolbox_tools: dict[str, Any] = await GetToolbox.get_toolbox_info()
+
+        # AgentNetworkDefinitionMiddleware._parse_agent only keeps instructions/description/tools in
+        # network_def, so a coded-tool agent (has a `class`, no `instructions`) looks identical to a
+        # toolbox agent to ToolboxNetworkValidator, which treats "no instructions" as "must be in
+        # toolbox_tools". The diagnostic context still has each agent's original `class`, so use it to
+        # exempt coded-tool agents from that check instead of misreporting them as missing toolbox tools.
+        diagnostic_context: dict[str, Any] = self.sly_data.get(AGENT_NETWORK_DIAGNOSTIC_CONTEXT, {})
+        coded_tool_names = {
+            agent.get("name")
+            for agent in diagnostic_context.get("tools", [])
+            if isinstance(agent, dict) and agent.get("class") and agent.get("name")
+        }
+        toolbox_tools = {**toolbox_tools, **{name: {} for name in coded_tool_names}}
 
         return (
             # The structure validator checks for the following structural issues:

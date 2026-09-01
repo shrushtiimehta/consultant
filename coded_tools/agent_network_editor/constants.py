@@ -26,6 +26,18 @@ AGENT_NETWORK_HOCON_TEXT: str = "agent_network_hocon_text"
 # Name of the agent network, used as the persistence file path or reservation identifier.
 AGENT_NETWORK_NAME: str = "agent_network_name"
 
+# Fields changed by instruction/description editing tools. The mapping shape is
+# ``{agent_name: {field_name: new_value}}`` and is used by source-preserving
+# persistence to avoid rebuilding an entire HOCON file for a surgical edit.
+AGENT_NETWORK_CHANGES: str = "agent_network_changes"
+
+# Exact source file used to load an existing network. Unlike AGENT_NETWORK_NAME,
+# this retains its directory so an editor can write back to the same file.
+AGENT_NETWORK_SOURCE_FILE: str = "agent_network_source_file"
+
+# Read-only, redacted view of the complete loaded HOCON used for diagnosis.
+AGENT_NETWORK_DIAGNOSTIC_CONTEXT: str = "agent_network_diagnostic_context"
+
 # Cached ProgressHandler instance controls AGENT_PROGRESS reporting throttling
 PROGRESS_HANDLER: str = "progress_handler"
 

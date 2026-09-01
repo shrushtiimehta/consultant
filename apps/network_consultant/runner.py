@@ -45,6 +45,8 @@ import shutil
 import subprocess
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import as_completed
 from pathlib import PurePosixPath
 from typing import Any
 from typing import Optional
@@ -244,7 +246,17 @@ def restore_success_ratios(originals: dict[str, str]) -> None:
 
 class _ApiKeyErrorCapture(logging.Handler):
     """Catches neuro-san's own logged API-key errors, which it otherwise only logs and
-    silently falls back from -- never raising an exception a caller could catch."""
+    silently falls back from -- never raising an exception a caller could catch.
+
+    # ponytail: attaches to the single process-wide root logger, so with run_all_tests'
+    # concurrent fixtures this instance can also receive another fixture's log record --
+    # neither contextvars nor threading.local propagate into the inner ThreadPoolExecutor
+    # workers that actually emit these records (verified empirically), so there's no clean
+    # way to attribute a record to "which fixture" without patching vendored neuro_san.
+    # Bounded impact: a misattributed record only mislabels one fixture's failure as
+    # infrastructure_error for one iteration, and the self-improve loop's max_iterations
+    # retries self-correct it. Revisit only if that misclassification shows up in practice.
+    """
 
     def __init__(self):
         super().__init__(level=logging.ERROR)
@@ -323,6 +335,11 @@ def run_fixture(fixture_path: str) -> dict[str, Any]:
         _write_consolidated_thinking(fixture_name, started)
 
 
+# How many fixtures run_all_tests runs concurrently. Mirrors the ThreadPoolExecutor pattern
+# DataDrivenAgentTestDriver.one_test() already uses to run a single fixture's repeats in parallel.
+MAX_CONCURRENT_FIXTURES = 5
+
+
 def run_all_tests(fixtures_dir: str, only_fixtures: list[str] = None) -> list[dict[str, Any]]:
     """
     :param fixtures_dir: Network path under tests/fixtures/, e.g. "generated/coffee_shop"
@@ -356,8 +373,10 @@ def run_all_tests(fixtures_dir: str, only_fixtures: list[str] = None) -> list[di
     )
     started = time.time()
     results = []
-    for path in paths:
-        results.append(run_fixture(path))
+    with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_FIXTURES) as executor:
+        futures = [executor.submit(run_fixture, path) for path in paths]
+        for future in as_completed(futures):
+            results.append(future.result())
     passed = sum(1 for r in results if r["passed"])
     logger.info(
         "run_all_tests done (%.1fs): %d/%d passing under %s", time.time() - started, passed, len(results), fixtures_dir
@@ -1169,7 +1188,11 @@ def main():  # pylint: disable=too-many-locals,too-many-statements,too-many-bran
                     with open(hocon_path, encoding="utf-8") as after_file:
                         hocon_after_consult = after_file.read()
                     if hocon_after_consult == hocon_before_consult:
-                        logger.info("consultant_editor made no changes; running the requested final confirmation.")
+                        logger.info(
+                            "consultant_editor made no changes; already all passing, nothing to re-verify. Stopping."
+                        )
+                        progress_tracker.record(results, "after", total_fixture_count)
+                        return
                     logger.info("Re-running full suite to verify that change didn't break anything...")
                     results = run_all_tests(network_name)
                     total_fixture_count = len(results)

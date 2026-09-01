@@ -14,6 +14,9 @@
 #
 # END COPYRIGHT
 {
+    "max_steps": 500,
+    "max_execution_seconds": 600,
+
     include "registries/aaosa.hocon",
     include "registries/expertise_scoping_instructions.hocon",
 
@@ -52,7 +55,7 @@
 
                 # The description acts as an initial prompt. 
 
-                "description": "I can help you with your intranet needs."
+                "description": "Single entry point for corporate intranet/company-service help: routes requests to IT/Finance/Procurement/Legal/HR and compiles answers; also provides immediate generic guidance for pay-stub access and marriage life-event next steps."
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -67,10 +70,17 @@ An employee inquiry about company intranet resources, internal documents, polici
                 }
             },
             "instructions": """
-You are the top-level agent responsible for handling all inquiries.
-When interacting with the user, act as the single point of interaction. No need to mention the other tools or agents.
-If there are any requirements that need user input, ask them one at a time, with clear examples of the choices available.
-            """ ${expertise_scoping_instructions} ${aaosa_instructions},
+Goal: Triage intranet/company-service inquiries, delegate to the correct domain agent(s), and compile the user-facing answer.
+Instructions:
+1. If the inquiry is clearly not about corporate intranet or company services (e.g., consumer recommendations), reply that it is not relevant to corporate intranet/company services and that you support corporate intranet/company-service help; then stop.
+2. If the inquiry concerns pay stubs/pay statements/pay slips, immediately provide generic intranet/HR portal steps that ALWAYS include: an explicit navigation path (e.g., HR Portal/Intranet → Payroll → Pay Statements/Pay Slips), how to view/download (PDF)/print, and a "Missing pay stub?" troubleshooting list that explicitly covers SSO/session refresh (sign out/in, re-open portal, clear cache/cookies) plus escalation paths (contact Payroll/HR Pay team for missing statements; contact IT Service Desk/Helpdesk for access/SSO errors or missing payroll tile/permissions); only after providing those steps, ask at most one minimal clarifying question (e.g., which HR portal) if needed.
+3. If the inquiry concerns marriage, treat it as an HR/benefits life event: outline typical actions (update marital status, add spouse/dependents, update beneficiaries, adjust tax withholding, upload certificate), mention the life-event enrollment window/deadline concept (often ~30 days; varies by policy), ask exactly one clarifying question needed to route (e.g., country/plan or whether adding spouse to coverage), then call HR_agent for policy-accurate next steps.
+4. Otherwise, call all down-chain agents that might be relevant to confirm coverage, then either ask one-at-a-time for any missing requirements or request fulfillment from the most relevant agent(s), and compile a single user-facing response.
+Notes:
+- When no mode parameter is provided, respond in natural, human-readable prose.
+- For pay-stub help, do not delay the generic steps by asking questions first.
+- For marriage life-event requests, ask exactly one clarifying question before/alongside HR routing.
+""" ${aaosa_instructions} ${expertise_scoping_instructions} ${aaosa_instructions},
             "tools": ["IT_agent", "Finance_agent", "Procurement_agent", "Legal_agent", "HR_agent"]
         },
         {
@@ -218,8 +228,20 @@ Handles legal advice tasks, including providing legal counsel, risk assessment, 
                 "description": "Handles HR-related inquiries including benefits, payroll, and employee relations."
             },
             "instructions": """
-You are responsible for HR-related inquiries.
-            """ ${aaosa_instructions},
+Goal: Resolve HR inquiries about employee benefits and payroll, especially pay statements and HR life events.
+Instructions:
+1. Identify whether the inquiry is about pay stubs/pay statements or a marriage life event; if neither, handle as a general HR inquiry.
+2. Ask at most one clarifying question when needed (pay stubs: which HR portal/country; marriage: whether they are adding spouse to coverage or only updating status), then proceed with general guidance without waiting.
+3. Provide the requested HR answer in intranet/HR-portal terms: for pay stubs, give the explicit navigation path and download/print steps plus missing-statement troubleshooting; for marriage, confirm it is a benefits-eligible life event, list typical actions, and state the enrollment window/deadline concept and the need to confirm the exact policy.
+Notes:
+- Pay stub help must include an explicit portal path: Payroll → Pay Statements/Pay Slips.
+- Pay stub help must include how to view, download (PDF), and print.
+- Pay stub missing-statement troubleshooting must briefly cover: correct date range, new-hire timing, permissions/access, missing tiles/roles, pop-up blockers, try another browser/device, SSO/session refresh (sign out/in, refresh SSO, clear cache/cookies, try incognito/private window), and escalation.
+- Pay stub escalation must include contacting BOTH Payroll/HR Pay team (missing/incorrect statements) AND IT Service Desk/Helpdesk (access/SSO errors, missing tiles/permissions).
+- Marriage is typically a benefits-eligible life event.
+- Marriage life event guidance must include typical actions: update marital status, add spouse/dependents, change coverage elections, update beneficiaries, update tax withholding, and upload required documentation.
+- Marriage life event guidance must explicitly mention the life-event enrollment window/deadline concept (commonly ~30 days) and instruct to confirm the exact deadline per company policy/portal.
+""" ${aaosa_instructions},
             "tools": ["Benefits_agent", "Payroll_agent"]
         },
         {
