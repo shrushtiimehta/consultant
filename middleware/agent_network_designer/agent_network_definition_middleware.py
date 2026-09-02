@@ -18,6 +18,7 @@ import asyncio
 import json
 import os
 import re
+from copy import deepcopy
 from json import JSONDecodeError
 from logging import getLogger
 from pathlib import Path
@@ -42,11 +43,18 @@ from langchain_core.messages import SystemMessage
 from leaf_common.resolution.resolver_util import ResolverUtil
 from neuro_san.interfaces.agent_progress_reporter import AgentProgressReporter
 from neuro_san.internals.persistence.abstract_async_config_restorer import AbstractAsyncConfigRestorer
+from pyhocon import ConfigFactory
+from pyhocon.config_tree import ConfigQuotedString
+from pyhocon.config_tree import ConfigSubstitution
+from pyhocon.config_tree import ConfigTree
+from pyhocon.config_tree import ConfigValues
+from pyhocon.exceptions import ConfigException
 from pyparsing.exceptions import ParseException
 
 from coded_tools.agent_network_editor.and_logger import AndLogger
 from coded_tools.agent_network_editor.connectivity_dictionary_converter import ConnectivityDictionaryConverter
 from coded_tools.agent_network_editor.constants import AGENT_NETWORK_DEFINITION
+from coded_tools.agent_network_editor.constants import AGENT_NETWORK_DIAGNOSTIC_CONTEXT
 from coded_tools.agent_network_editor.constants import AGENT_NETWORK_NAME
 from coded_tools.agent_network_editor.constants import AGENT_NETWORK_SOURCE_FILE
 from coded_tools.agent_network_editor.progress_handler import ProgressHandler
@@ -474,8 +482,12 @@ class AgentNetworkDefinitionMiddleware(AgentMiddleware):
         :param network_def: The agent network definition dictionary
         :return: Formatted prompt string
         """
-        definition_str: str = json.dumps(network_def, indent=2)
-        return f"## Current Agent Network Definition\n\n```json\n{definition_str}\n```"
+        # Prefer the full redacted HOCON view when a network was loaded from file: diagnosing a
+        # failure needs llm_config/class/toolbox/max_iterations, which network_def drops. Falls
+        # back to network_def for networks built in-session, which have no source config.
+        diagnostic_context = self.sly_data.get(AGENT_NETWORK_DIAGNOSTIC_CONTEXT, network_def)
+        definition_str: str = json.dumps(diagnostic_context, indent=2)
+        return f"## Current Agent Network Diagnostic Context\n\n```json\n{definition_str}\n```"
 
     async def _hocon_to_definition(self, network_hocon_file: str | None) -> dict[str, Any] | None:
         """
@@ -487,7 +499,148 @@ class AgentNetworkDefinitionMiddleware(AgentMiddleware):
         config: dict[str, Any] | None = await self._hocon_to_config(network_hocon_file)
         if config is None:
             return None
-        return await self._config_to_network_def(config, network_hocon_file)
+        network_def = await self._config_to_network_def(config, network_hocon_file)
+        if network_def is not None:
+            await self._apply_unresolved_instructions(network_def, network_hocon_file)
+            self.sly_data[AGENT_NETWORK_DIAGNOSTIC_CONTEXT] = self._build_diagnostic_context(config, network_def)
+        return network_def
+
+    async def _apply_unresolved_instructions(
+        self, network_def: dict[str, Any], network_hocon_file: str | None
+    ) -> None:
+        """
+        Replace each agent's instructions with the source literal, minus any ${...} substitution.
+
+        The normal parse expands ${aaosa_instructions} / ${expertise_scoping_instructions} inline, so
+        the editor reads shared boilerplate as if it were the agent's own text -- and then copies it
+        forward into whatever it writes. In the source those substitutions are separate tokens
+        concatenated OUTSIDE the quoted string, so re-parsing with resolve=False lets us keep the
+        quoted part and drop them structurally: no text matching, and no dependence on which aaosa
+        variant a given network happens to include (registries/aaosa.hocon and
+        registries/aaosa_basic.hocon define different text under the same key).
+
+        The hocon on disk is untouched -- nsflow and the runtime still load it resolved, with the
+        variables expanded as usual. This only changes what the editor reads.
+
+        Best-effort: if the unresolved parse fails, the already-resolved instructions are left in
+        place rather than failing the load.
+
+        :param network_def: Agent network definition to patch in place
+        :param network_hocon_file: Agent network hocon file path
+        """
+        file_reference: str | None = self._resolve_hocon_path(network_hocon_file)
+        if file_reference is None:
+            return
+
+        try:
+            # basedir="." to match the cwd-relative include paths these registries use
+            # (e.g. include "registries/aaosa.hocon"). With resolve=False an unreadable include
+            # only warns, so the agent literals still come back intact either way.
+            unresolved: ConfigTree = ConfigFactory.parse_string(
+                Path(file_reference).read_text(encoding="utf-8"), basedir=".", resolve=False
+            )
+            agents: Any = unresolved.get("tools", [])
+        except (OSError, ConfigException, ParseException) as error:
+            self.logger.warning(
+                "WARNING: Could not re-read '%s' unresolved; instructions may contain expanded "
+                "substitutions. %s",
+                file_reference,
+                error,
+            )
+            return
+
+        if not isinstance(agents, list):
+            return
+
+        for agent in agents:
+            if not isinstance(agent, ConfigTree):
+                continue
+            agent_name: Any = agent.get("name", None)
+            # Only touch agents that already came through with instructions -- function/toolbox
+            # agents have none, and must keep not having the key.
+            if not isinstance(agent_name, str) or agent_name not in network_def:
+                continue
+            if network_def[agent_name].get("instructions") is None:
+                continue
+            literal: str | None = self._literal_without_substitutions(agent.get("instructions", None))
+            if literal:
+                # Run through the same extractor the resolved path uses, so demo-mode text and the
+                # legacy prefix still get removed and whitespace is normalized identically. Its
+                # aaosa/expertise replacements simply find nothing left to strip.
+                network_def[agent_name]["instructions"] = await self._extract_custom_instructions(literal)
+
+    @staticmethod
+    def _literal_without_substitutions(value: Any) -> str | None:
+        """
+        Return a value's source text with its ${...} substitution tokens dropped.
+
+        A HOCON value built by concatenating strings and substitutions parses (unresolved) into a
+        ConfigValues holding one token per part: plain str for triple-quoted blocks,
+        ConfigQuotedString for "..." and ConfigSubstitution for each ${...}.
+
+        :param value: An unresolved parsed value
+        :return: The concatenated literal parts, or None if there are none
+        """
+        if isinstance(value, str):
+            return value
+        if not isinstance(value, ConfigValues):
+            return None
+
+        parts: list[str] = []
+        for token in value.tokens:
+            if isinstance(token, ConfigSubstitution):
+                continue
+            if isinstance(token, ConfigQuotedString):
+                parts.append(token.value)
+            elif isinstance(token, str):
+                parts.append(token)
+
+        return "".join(parts).strip() or None
+
+    @classmethod
+    def _build_diagnostic_context(cls, config: dict[str, Any], network_def: dict[str, Any]) -> dict[str, Any]:
+        """Build a complete but redacted view of fields relevant to failure diagnosis."""
+        omitted_root_keys = {
+            "aaosa_call",
+            "aaosa_command",
+            "aaosa_instructions",
+            "demo_mode",
+            "instructions_prefix",
+            "pii_patterns",
+            "tools",
+        }
+        context = {key: deepcopy(value) for key, value in config.items() if key not in omitted_root_keys}
+        diagnostic_agents = []
+        for raw_agent in config.get("tools", []):
+            if not isinstance(raw_agent, dict):
+                diagnostic_agents.append(deepcopy(raw_agent))
+                continue
+            agent = deepcopy(raw_agent)
+            agent_name = agent.get("name")
+            # Use the boilerplate-stripped instructions, so the diagnostic view does not
+            # re-introduce the aaosa/expertise text _extract_custom_instructions just removed.
+            if agent_name in network_def and "instructions" in agent:
+                agent["instructions"] = network_def[agent_name].get("instructions", "")
+            diagnostic_agents.append(agent)
+        context["tools"] = diagnostic_agents
+        return cls._redact_sensitive_values(context)
+
+    @classmethod
+    def _redact_sensitive_values(cls, value: Any, key_name: str = "") -> Any:
+        """Redact secret-bearing keys and common credential-shaped string values recursively."""
+        if re.search(r"(?:api[_-]?key|authorization|credential|password|secret|token)", key_name, re.IGNORECASE):
+            return "[REDACTED]"
+        if isinstance(value, dict):
+            return {key: cls._redact_sensitive_values(item, str(key)) for key, item in value.items()}
+        if isinstance(value, list):
+            return [cls._redact_sensitive_values(item, key_name) for item in value]
+        if isinstance(value, str) and re.search(
+            r"(?:sk-(?:proj-)?[A-Za-z0-9_-]{16,}|AIza[0-9A-Za-z_-]{35}|gh[pousr]_[A-Za-z0-9]+|"
+            r"xox[baprs]-[A-Za-z0-9-]+|Bearer\s+[A-Za-z0-9._~+/=-]{20,})",
+            value,
+        ):
+            return "[REDACTED]"
+        return value
 
     def _resolve_hocon_path(self, network_hocon_file: str | None) -> str | None:
         """
@@ -683,35 +836,40 @@ class AgentNetworkDefinitionMiddleware(AgentMiddleware):
 
     async def _extract_custom_instructions(self, instructions: str) -> str:
         """
-        Extract the custom part of instructions, excluding aaosa instructions, instructions prefix, and demo mode.
+        Extract the custom part of instructions, excluding aaosa instructions, expertise-scoping
+        instructions, and demo mode.
         :param instructions: The full instructions of an agent.
 
         :return: The part of instructions that is unique to the agent.
         """
 
-        # Pattern for instruction prefix (matches any agent name)
-        prefix_pattern = (
-            r"You are part of a \w+ of assistants\.\s*Only answer inquiries that are directly within "
-            r"your area of expertise\.\s*Do not try to help for other matters\.\s*"
-            r"Do not mention what you can NOT do\. Only mention what you can do\."
-        )
+        # Legacy prefix some older networks still have baked in verbatim, from before
+        # expertise_scoping_instructions.hocon was simplified to drop this lead-in sentence.
+        legacy_prefix_pattern = r"You are part of a \w+ of assistants\.\s*"
 
         demo_mode = (
             "You are part of a demo system, so when queried, make up a realistic response as if "
             "you are actually grounded in real data or you are operating a real application API or microservice."
         )
 
-        aaosa_instructions: str = await self._get_aaosa_instructions()
+        # Both substitution files define their text with real newlines, but custom_part gets its
+        # whitespace collapsed to single spaces below -- normalize these the same way, or the
+        # .replace() calls never match and the boilerplate silently survives into custom_part.
+        aaosa_instructions: str = " ".join((await self._get_aaosa_instructions()).split())
+        expertise_scoping_instructions: str = " ".join((await self._get_expertise_scoping_instructions()).split())
 
         # Clean and normalize the input
         custom_part: str = instructions.strip()
         custom_part = re.sub(r"\s+", " ", custom_part)  # Normalize whitespace
 
-        # Remove instruction prefix using regex
-        custom_part = re.sub(prefix_pattern, "", custom_part).strip()
+        # Remove the legacy prefix sentence, if present
+        custom_part = re.sub(legacy_prefix_pattern, "", custom_part).strip()
 
-        # Remove aaosa text
-        custom_part = custom_part.replace(aaosa_instructions.strip(), "").strip()
+        # Remove aaosa text and expertise-scoping text -- loaded from the same source files that
+        # get substituted into the actual hocon, so this always matches what's really there instead
+        # of a hardcoded guess that can drift out of sync and let boilerplate leak into custom_part.
+        custom_part = custom_part.replace(aaosa_instructions, "").strip()
+        custom_part = custom_part.replace(expertise_scoping_instructions, "").strip()
 
         # Remove demo mode text
         custom_part = custom_part.replace(demo_mode.strip(), "").strip()
@@ -727,30 +885,49 @@ class AgentNetworkDefinitionMiddleware(AgentMiddleware):
 
         :return: aaosa instructions
         """
-        aaosa_instructions: str = ""
+        return await self._get_cached_substitution("aaosa_instructions", "registries/aaosa.hocon")
 
-        # Try to get aaosa_instructions from sly_data cache
-        async with await SlyDataLock.get_lock(self.sly_data, "aaosa_instructions_lock"):
-            aaosa_instructions = self.sly_data.get("aaosa_instructions")
-            if aaosa_instructions is not None:
+    async def _get_expertise_scoping_instructions(self) -> str:
+        """
+        Get expertise-scoping instructions potentially from cache in sly_data
+
+        :return: expertise-scoping instructions
+        """
+        return await self._get_cached_substitution(
+            "expertise_scoping_instructions", "registries/expertise_scoping_instructions.hocon"
+        )
+
+    async def _get_cached_substitution(self, key: str, hocon_file: str) -> str:
+        """
+        Load a single-key substitution hocon file (e.g. aaosa_instructions, expertise_scoping_instructions),
+        caching the result in sly_data so it's only read from disk once per session.
+
+        :param key: The top-level hocon key holding the substitution text.
+        :param hocon_file: Path to the hocon file defining that key.
+        :return: The substitution text, or "" if the file/key doesn't exist.
+        """
+        value: str = ""
+
+        async with await SlyDataLock.get_lock(self.sly_data, f"{key}_lock"):
+            value = self.sly_data.get(key)
+            if value is not None:
                 # Return early with cached value
-                return aaosa_instructions
+                return value
 
             # Get from file
             try:
-                use_file = "registries/aaosa.hocon"
                 hocon = AbstractAsyncConfigRestorer(
                     file_purpose="get_agent_network_definition - custom instructions", must_exist=True
                 )
-                config: dict[str, Any] = await hocon.async_restore(file_reference=use_file)
-                aaosa_instructions = config.get("aaosa_instructions", "")
+                config: dict[str, Any] = await hocon.async_restore(file_reference=hocon_file)
+                value = config.get(key, "")
             except FileNotFoundError:
-                aaosa_instructions = ""
+                value = ""
 
             # Cache the loaded value in sly_data for subsequent calls
-            self.sly_data["aaosa_instructions"] = aaosa_instructions
+            self.sly_data[key] = value
 
-        return aaosa_instructions
+        return value
 
     def _extract_name_from_reservation_id(self, reservation_id: str) -> str:
         # re.search() scans through the string looking for the UUID pattern

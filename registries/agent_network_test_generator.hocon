@@ -109,8 +109,8 @@ Each scenario you return must include:
 
 # Canonical descriptions in docs/agent_network_test_generator.md — keep in sync.
 The `test_level` parameter controls how many scenarios you must generate:
-- `minimum`: Generate 2-3 scenarios. Focus on the single most important happy-path and one critical edge case.
-- `normal`: Generate 5-7 scenarios. Cover the main happy paths, a few edge cases, and at least one error/boundary scenario.
+- `minimum`: Generate 2-3 scenarios. Focus on the single most important happy-path and one critical edge case. Avoid multi-turn scenarios.
+- `normal`: Generate 5-7 scenarios. Cover the main happy paths, a few edge cases, and at least one error/boundary scenario. Avoid multi-turn scenarios.
 - `max`: Generate 10-15 scenarios. Exhaustively cover all agent capabilities, multiple edge cases, error handling, boundary conditions, and multi-turn flows.
 
 Guidelines for planning scenarios:

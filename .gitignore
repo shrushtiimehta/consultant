@@ -207,3 +207,7 @@ memory/
 
 # test local only
 registries/manifest.hocon.test
+
+# Network Consultant generated test fixtures
+tests/fixtures/industry/intranet_agents/
+tests/fixtures/industry/intranet_agents_with_tools/

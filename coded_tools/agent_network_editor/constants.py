@@ -39,6 +39,12 @@ AGENT_NETWORK_PENDING_CHANGES: str = "agent_network_pending_changes"
 # this retains its directory so an editor can write back to the same file.
 AGENT_NETWORK_SOURCE_FILE: str = "agent_network_source_file"
 
+# Read-only, redacted view of the complete loaded HOCON used for diagnosis.
+# Unlike AGENT_NETWORK_DEFINITION (instructions/description/tools only), this keeps
+# llm_config, class, toolbox, max_iterations and the rest, so a consultant diagnosing
+# a failure can see the fields that actually caused it.
+AGENT_NETWORK_DIAGNOSTIC_CONTEXT: str = "agent_network_diagnostic_context"
+
 # Cached ProgressHandler instance controls AGENT_PROGRESS reporting throttling
 PROGRESS_HANDLER: str = "progress_handler"
 

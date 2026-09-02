@@ -20,6 +20,11 @@ agent_network_designer in modify mode. agent_network_designer is a general creat
 tool that has to first figure out "is this structural or instructions-only"; consultant
 skips that and goes straight from a failing-test report to per-agent instruction fixes.
 
+This module also contains the fixture-running engine (formerly test_runner.py): running every
+ANTeGen-generated test fixture for a network and reporting pass/fail per fixture, without going
+through pytest. Reuses neuro_san's own data-driven test driver -- the same one
+`make test-integration` uses -- so results match exactly what CI would report.
+
 By default this runs in-process (--connection direct), no server needed. Pass --connection
 http to instead talk to an already-running `ns run` server -- useful if you want this to share
 a server with other clients, but NOT to watch the run in nsflow: nsflow's live view only shows
@@ -44,10 +49,13 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import PurePosixPath
-from typing import Callable
+from typing import Any
 from typing import Optional
+from unittest import TestCase
 
 import neuro_san_studio
 
@@ -75,22 +83,25 @@ os.environ.setdefault("AGENT_TEST_THINKING_BASIS", "/tmp/network_consultant_test
 
 # These imports intentionally follow the direct-session environment defaults above.
 # pylint: disable=wrong-import-position
+from leaf_common.time.timeout_reached_exception import TimeoutReachedException  # noqa: E402
 from neuro_san.client.agent_session_factory import AgentSessionFactory  # noqa: E402
 from neuro_san.client.streaming_input_processor import StreamingInputProcessor  # noqa: E402
+from neuro_san.test.driver.data_driven_agent_test_driver import DataDrivenAgentTestDriver  # noqa: E402
+from neuro_san.test.unittest.unit_test_assert_forwarder import UnitTestAssertForwarder  # noqa: E402
 
-from apps.network_consultant.test_runner import IMPROVEMENT_THINKING_DIR  # noqa: E402
-from apps.network_consultant.test_runner import restore_success_ratios  # noqa: E402
-from apps.network_consultant.test_runner import run_all_tests  # noqa: E402
-from apps.network_consultant.test_runner import set_success_ratio_for_fixtures  # noqa: E402
 from coded_tools.agent_network_consultant.network_scratchpad import clear_for_hocon_file  # noqa: E402
 
 # Not __name__: this module runs as "__main__" via `python -m`, which would otherwise
-# produce an unhelpful logger name.
+# produce an unhelpful logger name. One logger for the whole module -- runner.py and
+# test_runner.py used to log under two different names; now that they're one file, everything
+# logs as "network_consultant".
 logger = logging.getLogger("network_consultant")
 
 # Ratio a fixture gets bumped to once consultant is CONFIDENT its fix holds up under
 # repeated runs. Everything else stays at whatever cheap ratio (usually 1/1) it already had --
-# re-running every fixture at 3/3 every round is not worth the token cost.
+# re-running every fixture at 3/3 every round is not worth the token cost. The authoritative
+# Before/After bars lift the bump and use each fixture's own ratio: that is the network's
+# real score, not the stricter one a vouched-for fix is being held to.
 CONFIDENT_SUCCESS_RATIO = "3/3"
 
 # Generous by design: the goal is to actually improve the network, not stop the moment progress
@@ -101,15 +112,376 @@ PLATEAU_STRIKES = 3
 # re-check while the network is still climbing. Fixing continues until the failing subset is
 # clean; the full sweep that follows is then accepted at this rate instead of demanding 100%.
 GOOD_ENOUGH_RATIO = 0.8
+# Ceiling on how many fixtures run at once. Each one nests its own pool underneath -- neuro-san's
+# DataDrivenAgentTestDriver.one_test runs a fixture's success_ratio iterations in parallel too --
+# so peak live agent sessions is this times the ratio, and an uncapped 15-fixture suite at 3/3
+# was 45 of them: straight into provider rate limits, which surface here as fixture failures and
+# send consultant off to "fix" a network that was fine.
+MAX_PARALLEL_FIXTURES = 7
 DEFAULT_HOST = "localhost"
 DEFAULT_PORT = 8080
 THINKING_FILE = "/tmp/network_consultant_thinking.txt"
 # StreamingInputProcessor only attaches its ThinkingFileMessageProcessor when BOTH
 # thinking_file and thinking_dir are non-None -- a bare thinking_file is silently ignored.
 THINKING_DIR = "/tmp/network_consultant_thinking"
-# Per-network iteration history (pass/total per round), so a chart can be built after the fact
-# even for a plain CLI run that never sets the nsflow job env vars below.
-PROGRESS_DIR = "/tmp/network_consultant_progress"
+API_KEY_ERROR_MARKER = "API KEY error detected"
+
+# Matches coded_tools/agent_network_consultant/read_thinking_trace.py's THINKING_DIR
+# and the "--- <agent_origin> ---" section headers it parses.
+IMPROVEMENT_THINKING_DIR = os.path.join("logs", "thinking_dir", "improvement")
+
+# Matches ThinkingFileMessageProcessor._write_to_file's entry header exactly:
+# f"\n[{message_type_str}{use_origin}] @ {timestamp_str}:\n"
+_THINKING_ENTRY_HEADER = re.compile(r"^\[(?P<type>[A-Z_]+)[^\]]*\] @ .+:$", re.MULTILINE)
+
+# Telemetry keys unique to neuro-san's own token/cost-accounting report -- never part of an
+# agent's actual reasoning or AAOSA dialogue.
+_COST_ACCOUNTING_KEYS = ("prompt_tokens", "completion_tokens", "total_cost", "total_tokens")
+
+
+# =============================================================================================
+# Fixture-running engine (formerly test_runner.py)
+# =============================================================================================
+
+
+def _is_noise_paragraph(paragraph: str) -> bool:
+    """A chat_context dump (conversation-continuation bookkeeping) or a token/cost-accounting
+    report -- both are telemetry a diagnosing agent has no use for, not dialogue content."""
+    if paragraph.startswith("chat_context:"):
+        return True
+    body = paragraph.strip("`").removeprefix("json").strip() if paragraph.startswith("```") else paragraph
+    return body.startswith("{") and any(key in body for key in _COST_ACCOUNTING_KEYS)
+
+
+def _strip_system_entries(raw_text: str) -> str:
+    """Drop every [SYSTEM ...] entry (an agent's full instructions/system prompt) from one
+    agent's raw thinking file, keeping everything else -- its own reasoning, the AAOSA
+    inquiry/response exchange with its down-chain agents, tool calls/results, final answer.
+    Also drops chat_context dumps and cost-accounting reports, wherever they appear."""
+    headers = list(_THINKING_ENTRY_HEADER.finditer(raw_text))
+    if not headers:
+        return raw_text.strip()
+    kept: list[str] = []
+    for index, header in enumerate(headers):
+        if header.group("type") == "SYSTEM":
+            continue
+        end = headers[index + 1].start() if index + 1 < len(headers) else len(raw_text)
+        # Split header from body BEFORE paragraph-splitting: a noise block (chat_context dump,
+        # cost report) can immediately follow the header with no blank line in between, which
+        # would otherwise glue it onto the header into one paragraph that starts with "[TYPE...]"
+        # instead of "{" or "```" -- invisible to _is_noise_paragraph.
+        header_line = header.group(0)
+        body = raw_text[header.end() : end].strip()
+        paragraphs = [p for p in body.split("\n\n") if not _is_noise_paragraph(p.strip())]
+        body = "\n\n".join(paragraphs).strip()
+        entry = f"{header_line}\n{body}" if body else ""
+        if entry:
+            kept.append(entry)
+    return "\n\n".join(kept)
+
+
+def _write_consolidated_thinking(fixture_name: str, started: float) -> None:
+    """Consolidate neuro-san's raw per-agent thinking files (written under
+    AGENT_TEST_THINKING_BASIS while this fixture just ran) into the one file
+    read_thinking_trace serves back to the consultant's diagnosing sub-agents: system prompts
+    stripped, one `--- <agent_origin> ---` section per agent, only this run's own directories
+    (older leftovers under the same basis dir are ignored via mtime).
+
+    No-ops if AGENT_TEST_THINKING_BASIS isn't set (thinking files were never being written in
+    the first place) or if this fixture produced none.
+
+    Known upstream gap (neuro_san.test.driver.data_driven_agent_test_driver._setup_thinking_dir):
+    its per-turn directory name has only second-level timestamp precision, so two turns of the
+    same iteration that finish within the same wall-clock second collide on one directory --
+    the later turn's setup rmtree()s the earlier turn's files before writing its own. Multi-turn
+    fixtures can silently lose an earlier turn's thinking trace; nothing in this file can recover
+    it after the fact. Not something to patch here -- it lives in the installed neuro-san package.
+    """
+    basis_dir = os.environ.get("AGENT_TEST_THINKING_BASIS")
+    if not basis_dir:
+        return
+    run_dirs = sorted(
+        d
+        for d in glob.glob(os.path.join(basis_dir, f"*_{fixture_name}*"))
+        if os.path.isdir(d) and os.path.getmtime(d) >= started
+    )
+    if not run_dirs:
+        return
+
+    # A fixture with success_ratio > 1 (e.g. "3/3") runs several iterations of the SAME
+    # interactions concurrently (see DataDrivenAgentTestDriver.one_test), each iteration
+    # getting its own thinking directories, named "..._<iteration_index>". Consolidating every
+    # iteration would glue N near-identical retries together under one section per agent --
+    # wasted tokens, and it obscures which attempt a diagnosing agent is even looking at. Keep
+    # only the earliest iteration's directories (every turn of it, since turns of the SAME
+    # iteration share that suffix) -- a failing fixture almost always fails the same way across
+    # iterations, so one is representative. A single-iteration fixture (no suffix at all) is
+    # unaffected: every directory shares the same (empty) key below.
+    def _iteration_of(run_dir: str) -> str:
+        match = re.search(r"_(\d+)$", os.path.basename(run_dir))
+        return match.group(1) if match else ""
+
+    first_iteration = _iteration_of(run_dirs[0])
+    run_dirs = [d for d in run_dirs if _iteration_of(d) == first_iteration]
+
+    sections: dict[str, list[str]] = {}
+    for run_dir in run_dirs:
+        for agent_file in sorted(os.listdir(run_dir)):
+            path = os.path.join(run_dir, agent_file)
+            if not os.path.isfile(path):
+                continue
+            with open(path, encoding="utf-8", errors="replace") as file:
+                raw = file.read()
+            # First line is always "Agent: <origin_str>\n" (ThinkingFileMessageProcessor);
+            # use that as the true origin name rather than the "/"->"__" sanitized filename.
+            first_line, _, rest = raw.partition("\n")
+            agent_origin = first_line[len("Agent: ") :].strip() if first_line.startswith("Agent: ") else agent_file
+            filtered = _strip_system_entries(rest)
+            if filtered:
+                sections.setdefault(agent_origin, []).append(filtered)
+
+    if not sections:
+        return
+
+    os.makedirs(IMPROVEMENT_THINKING_DIR, exist_ok=True)
+    out_path = os.path.join(IMPROVEMENT_THINKING_DIR, f"{fixture_name}.txt")
+    with open(out_path, "w", encoding="utf-8") as out_file:
+        for agent_origin, chunks in sections.items():
+            out_file.write(f"--- {agent_origin} ---\n")
+            out_file.write("\n\n".join(chunks))
+            out_file.write("\n\n")
+    logger.info("Consolidated thinking trace written: %s (%d agent(s))", out_path, len(sections))
+
+
+SUCCESS_RATIO_PATTERN = re.compile(r'("success_ratio"\s*:\s*")(\d+/\d+)(")')
+
+
+def fixture_paths(fixtures_dir: str) -> list[str]:
+    """:return: Sorted list of fixture HOCON paths under tests/fixtures/<fixtures_dir>/."""
+    search_dir = os.path.join("tests", "fixtures", fixtures_dir)
+    return sorted(glob.glob(os.path.join(search_dir, "*.hocon")))
+
+
+def _set_success_ratio_for_paths(paths: list[str], ratio: str) -> dict[str, str]:
+    """Overwrite success_ratio in place for exactly the given fixture paths."""
+    originals: dict[str, str] = {}
+    for path in paths:
+        with open(path, encoding="utf-8") as fixture_file:
+            text = fixture_file.read()
+        match = SUCCESS_RATIO_PATTERN.search(text)
+        if not match or match.group(2) == ratio:
+            continue
+        originals[path] = match.group(2)
+        with open(path, "w", encoding="utf-8") as fixture_file:
+            fixture_file.write(SUCCESS_RATIO_PATTERN.sub(rf"\g<1>{ratio}\g<3>", text, count=1))
+        logger.info("success_ratio %s -> %s: %s", originals[path], ratio, path)
+    return originals
+
+
+def set_success_ratio_for_fixtures(fixtures_dir: str, fixture_names: list[str], ratio: str) -> dict[str, str]:
+    """
+    Overwrite success_ratio in place for specific fixtures only (by basename), e.g. those the
+    consultant flagged CONFIDENT_FIX for -- letting most fixtures stay cheap (1/1) while only
+    the ones worth the extra token spend get re-verified at a stricter ratio.
+
+    :param fixtures_dir: Network path under tests/fixtures/, as in run_all_tests.
+    :param fixture_names: Basenames (e.g. "foo.hocon") to change; others are left untouched.
+    :param ratio: New value, e.g. "3/3".
+    :return: {fixture_path: original_ratio} for every fixture actually changed, so the
+             caller can restore it later via restore_success_ratios.
+    """
+    wanted = set(fixture_names)
+    paths = [path for path in fixture_paths(fixtures_dir) if os.path.basename(path) in wanted]
+    return _set_success_ratio_for_paths(paths, ratio)
+
+
+def set_success_ratios(fixtures_dir: str, ratio: str) -> dict[str, str]:
+    """
+    Overwrite every fixture's top-level success_ratio in place.
+
+    :param fixtures_dir: Network path under tests/fixtures/, as in run_all_tests.
+    :param ratio: New value, e.g. "3/3".
+    :return: {fixture_path: original_ratio} for every fixture actually changed, so the
+             caller can restore it later via restore_success_ratios.
+    """
+    originals = _set_success_ratio_for_paths(fixture_paths(fixtures_dir), ratio)
+    logger.info("set_success_ratios(%s, %s): changed %d/%d fixtures", fixtures_dir, ratio, len(originals),
+                      len(fixture_paths(fixtures_dir)))
+    return originals
+
+
+def restore_success_ratios(originals: dict[str, str]) -> None:
+    """Undo set_success_ratios, restoring each fixture's original success_ratio."""
+    for path, ratio in originals.items():
+        with open(path, encoding="utf-8") as fixture_file:
+            text = fixture_file.read()
+        with open(path, "w", encoding="utf-8") as fixture_file:
+            fixture_file.write(SUCCESS_RATIO_PATTERN.sub(rf"\g<1>{ratio}\g<3>", text, count=1))
+        logger.info("success_ratio restored -> %s: %s", ratio, path)
+    logger.info("restore_success_ratios: restored %d fixture(s)", len(originals))
+
+
+def _run_real_ratio_suite(fixtures_dir: str, original_ratios: dict[str, str], ratio: str) -> list[dict[str, Any]]:
+    """Run the full suite for an authoritative Before/After bar. Those bars always score against
+    each fixture's own success_ratio -- that is the network's real score -- so lift any
+    CONFIDENT_FIX bump for the duration of the run, then put it straight back: the loop often
+    continues afterwards, and a fix the consultant vouched for should stay on its stricter ratio
+    when it does.
+
+    `original_ratios` is updated in place, so it keeps tracking exactly what needs undoing.
+    """
+    bumped_paths = list(original_ratios)
+    restore_success_ratios(original_ratios)
+    original_ratios.clear()
+    try:
+        return run_all_tests(fixtures_dir)
+    finally:
+        original_ratios.update(_set_success_ratio_for_paths(bumped_paths, ratio))
+
+
+class _ApiKeyErrorCapture(logging.Handler):
+    """Catches neuro-san's own logged API-key errors, which it otherwise only logs and
+    silently falls back from -- never raising an exception a caller could catch.
+
+    A handler is added to the shared root logger, so with run_all_tests running fixtures
+    concurrently, every concurrently-running fixture's handler would otherwise see every OTHER
+    fixture's log records too -- filtering to this handler's own thread keeps one fixture's
+    capture from picking up another's API-key error."""
+
+    def __init__(self):
+        super().__init__(level=logging.ERROR)
+        self.messages: list[str] = []
+        self._thread_id = threading.get_ident()
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if record.thread != self._thread_id:
+            return
+        message = record.getMessage()
+        if API_KEY_ERROR_MARKER in message:
+            self.messages.append(message.strip())
+
+
+def run_fixture(fixture_path: str) -> dict[str, Any]:
+    """
+    :param fixture_path: Path to a single test fixture HOCON file.
+    :return: Result with fixture/path/passed/message/infrastructure_error fields.
+    """
+    # one_test() raises a single AssertionError (summarizing every interaction/iteration
+    # mismatch) only if the fixture's success_ratio wasn't met, so a plain try/except
+    # is all the aggregation this needs.
+    fixture_name = os.path.basename(fixture_path)
+    asserts = UnitTestAssertForwarder(TestCase())
+    driver = DataDrivenAgentTestDriver(asserts, test_name=fixture_name)
+    result = {"fixture": fixture_name, "path": fixture_path, "infrastructure_error": False}
+
+    logger.info("run_fixture start: %s", fixture_name)
+    started = time.time()
+    capture = _ApiKeyErrorCapture()
+    root_logger = logging.getLogger()
+    root_logger.addHandler(capture)
+    try:
+        driver.one_test(fixture_path)
+        logger.info("run_fixture pass (%.1fs): %s", time.time() - started, fixture_name)
+        return {**result, "passed": True, "message": None}
+    except AssertionError as exc:
+        cause = exc.__cause__ or exc
+        if capture.messages:
+            api_key_summary = "\n".join(capture.messages)
+            logger.warning(
+                "run_fixture infrastructure_error (%.1fs, API key error): %s", time.time() - started, fixture_name
+            )
+            return {
+                **result,
+                "passed": False,
+                "message": f"{api_key_summary}\n\n(Original assertion, likely a symptom of the above: {cause})",
+                "infrastructure_error": True,
+            }
+        logger.info("run_fixture fail (%.1fs): %s -- %s", time.time() - started, fixture_name, cause)
+        return {**result, "passed": False, "message": str(cause)}
+    except TimeoutReachedException as exc:
+        # exc carries no message of its own (leaf_common never sets one) -- report the interaction's
+        # own timeout budget so a human knows to raise timeout_in_seconds, not chase a phantom bug.
+        limit = exc.timeout.get_limit_in_seconds()
+        name = exc.timeout.get_name() or fixture_name
+        message = (
+            f"TIMEOUT_ISSUE: {fixture_name}: interaction {name!r} exceeded its {limit:.0f}s timeout -- "
+            f"increase timeout_in_seconds in this fixture."
+        )
+        logger.warning(
+            "run_fixture infrastructure_error (%.1fs, timeout): %s", time.time() - started, fixture_name
+        )
+        return {**result, "passed": False, "message": message, "infrastructure_error": True}
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        message = f"{type(exc).__name__}: {exc}"
+        if capture.messages:
+            api_key_summary = "\n".join(capture.messages)
+            message = f"{api_key_summary}\n\n(Original exception, likely a symptom of the above: {message})"
+        logger.warning(
+            "run_fixture infrastructure_error (%.1fs): %s -- %s", time.time() - started, fixture_name, message
+        )
+        return {
+            **result,
+            "passed": False,
+            "message": message,
+            "infrastructure_error": True,
+        }
+    finally:
+        root_logger.removeHandler(capture)
+        _write_consolidated_thinking(fixture_name, started)
+
+
+def run_all_tests(fixtures_dir: str, only_fixtures: list[str] = None) -> list[dict[str, Any]]:
+    """
+    :param fixtures_dir: Network path under tests/fixtures/, e.g. "generated/coffee_shop"
+                (matches ANTeGen's target_agent_name, i.e. the hocon file path minus ".hocon").
+    :param only_fixtures: If given, run only these basenames (e.g. ["foo.hocon"]) instead of
+                every fixture in the directory -- lets a caller cheaply re-verify just the
+                handful of fixtures it touched instead of paying for the full suite every round.
+    :return: One result dict (see run_fixture) per fixture found, in fixture_paths order
+                (independent of the order fixtures actually finished in).
+    """
+    paths = fixture_paths(fixtures_dir)
+    if only_fixtures is not None:
+        wanted = set(only_fixtures)
+        paths = [path for path in paths if os.path.basename(path) in wanted]
+    if not paths:
+        search_dir = os.path.join("tests", "fixtures", fixtures_dir)
+        logger.warning("run_all_tests: no fixtures found under %s (only_fixtures=%s)", search_dir, only_fixtures)
+        return [
+            {
+                "fixture": "<fixture discovery>",
+                "path": search_dir,
+                "passed": False,
+                "message": f"No test fixtures found under '{search_dir}'.",
+                "infrastructure_error": True,
+            }
+        ]
+    logger.info(
+        "run_all_tests start: %d fixture(s) under %s%s",
+        len(paths),
+        fixtures_dir,
+        f" (subset of {only_fixtures})" if only_fixtures is not None else "",
+    )
+    started = time.time()
+    # Run fixtures concurrently (one thread each) instead of one at a time -- run_fixture
+    # is already safe to call this way: _write_consolidated_thinking is keyed by fixture name,
+    # and _ApiKeyErrorCapture filters to its own thread.
+    with ThreadPoolExecutor(max_workers=min(len(paths), MAX_PARALLEL_FIXTURES)) as executor:
+        results = list(executor.map(run_fixture, paths))
+    passed = sum(1 for r in results if r["passed"])
+    logger.info(
+        "run_all_tests done (%.1fs): %d/%d passing under %s",
+        time.time() - started,
+        passed,
+        len(results),
+        fixtures_dir,
+    )
+    return results
+
+
+# =============================================================================================
+# Orchestration (formerly runner.py)
+# =============================================================================================
 
 
 def open_session(agent_name: str, connection: str, host: str, port: int):
@@ -193,6 +565,79 @@ def chat(session, thread: dict, message: str, sly_data: dict = None) -> tuple:
 NSFLOW_JOB_ID = os.environ.get("NSFLOW_JOB_ID")
 NSFLOW_JOB_DIR = os.environ.get("NSFLOW_JOB_DIR")
 HEADLESS_POLL_INTERVAL_SECONDS = 1.0
+
+
+class _ProgressTracker:
+    """Persist chart-ready test checkpoints for an nsflow-launched run.
+
+    The runner frequently re-tests only the fixtures that were failing.  The chart still needs
+    to show progress against the *whole* suite, so this tracker retains the last known state of
+    untested fixtures and assigns newly passing fixtures to a new blue cohort on each iteration.
+    A full-suite Before/After checkpoint resets that assumption with authoritative results.
+    """
+
+    def __init__(self):
+        self.path = (
+            os.path.join(NSFLOW_JOB_DIR, f"{NSFLOW_JOB_ID}.progress.jsonl")
+            if NSFLOW_JOB_ID and NSFLOW_JOB_DIR
+            else None
+        )
+        self.check_number = 0
+        self.fixture_cohorts: dict[str, int] = {}
+        self.next_cohort = 1
+        self.last_entry: Optional[dict[str, Any]] = None
+
+    def record(
+        self,
+        results: list[dict[str, Any]],
+        checkpoint: str,
+        total_fixture_count: int,
+        improvement_iteration: Optional[int] = None,
+    ) -> None:
+        """Update cumulative state and, for nsflow jobs, append one complete checkpoint."""
+        passing = {result["fixture"] for result in results if result.get("passed")}
+        tested = {result["fixture"] for result in results}
+
+        if checkpoint in {"generated", "before", "after"}:
+            # These checkpoints always come from the complete suite and therefore replace every
+            # inferred state left over from targeted re-tests.
+            self.fixture_cohorts = {fixture: 0 for fixture in passing}
+            self.next_cohort = 1
+            segments = [len(passing)]
+        else:
+            cohort = self.next_cohort
+            for fixture in tested:
+                if fixture in passing:
+                    if fixture not in self.fixture_cohorts:
+                        self.fixture_cohorts[fixture] = cohort
+                else:
+                    self.fixture_cohorts.pop(fixture, None)
+            self.next_cohort += 1
+            segments = [
+                sum(1 for fixture_cohort in self.fixture_cohorts.values() if fixture_cohort == cohort_index)
+                for cohort_index in range(self.next_cohort)
+            ]
+
+        if not self.path:
+            return
+        entry = {
+            "check": self.check_number + 1,
+            "checkpoint": checkpoint,
+            "improvement_iteration": improvement_iteration,
+            "passed": min(len(self.fixture_cohorts), total_fixture_count),
+            "total": total_fixture_count,
+            "segments": segments,
+        }
+        # Some paths confirm the same full suite twice in a row (e.g. a subset re-check's
+        # confirmation run, followed by a consultant that then makes no edit). One After bar per
+        # result, not two identical ones side by side.
+        if self.last_entry is not None and {**entry, "check": 0} == {**self.last_entry, "check": 0}:
+            return
+        self.check_number += 1
+        self.last_entry = entry
+        with open(self.path, "a", encoding="utf-8") as progress_file:
+            progress_file.write(json.dumps(entry) + "\n")
+
 
 
 def _ask_headless(question: str) -> str:
@@ -352,86 +797,6 @@ def _stop_git_versioning(worktree_dir: Optional[str]) -> None:
     subprocess.run(["git", "worktree", "remove", "--force", worktree_dir], capture_output=True)
 
 
-_PROGRESS_STEPS: dict[str, int] = {}
-_PROGRESS_PATHS_WRITTEN: set[str] = set()
-
-
-def _progress_paths(network_name: str) -> list[str]:
-    os.makedirs(PROGRESS_DIR, exist_ok=True)
-    paths = [os.path.join(PROGRESS_DIR, f"{network_name.replace('/', '_')}.progress.jsonl")]
-    if NSFLOW_JOB_ID and NSFLOW_JOB_DIR:
-        paths.append(os.path.join(NSFLOW_JOB_DIR, f"{NSFLOW_JOB_ID}.progress.jsonl"))
-    return paths
-
-
-def _start_progress_batch(network_name: str) -> None:
-    """Start a new bar: the next _write_progress call(s) for this network begin a fresh row
-    instead of editing the previous batch's. Call once per run_all_tests round (a subset
-    re-check and its follow-up full-suite confirmation are separate batches, so each gets its
-    own bar) -- NOT once per test within that round."""
-    for path in _progress_paths(network_name):
-        _PROGRESS_STEPS[path] = _PROGRESS_STEPS.get(path, 0) + 1
-
-
-def _write_progress(network_name: str, passed: int, total: int, complete: bool, full_suite: bool = True) -> None:
-    """Update the current batch's progress row in PROGRESS_DIR (always) and, when running as an
-    nsflow job, in the job dir too (surfaced there as a live progress chart). Call after each
-    test in a batch so the bar edits live instead of only appearing once the batch finishes.
-    `complete` marks whether this was the batch's last test, so the chart can render a
-    still-running bar differently (e.g. faded) from a finished one. `full_suite` marks whether
-    this batch checked every fixture (the initial baseline and the final confirmation) as
-    opposed to only the fixtures that were still failing last round -- the chart uses this to
-    tell an authoritative before/after result apart from an in-progress retest of just what's
-    broken. The first write to a given file in this process ignores whatever it finds on disk --
-    a fresh run shouldn't inherit a prior run's tail rows -- every write after that preserves
-    earlier bars."""
-    for path in _progress_paths(network_name):
-        step = _PROGRESS_STEPS.setdefault(path, 1)
-        rows = []
-        if path in _PROGRESS_PATHS_WRITTEN and os.path.exists(path):
-            with open(path, encoding="utf-8") as existing:
-                rows = [json.loads(line) for line in existing if line.strip()]
-        rows = [row for row in rows if row["iteration"] != step]
-        rows.append(
-            {"iteration": step, "passed": passed, "total": total, "complete": complete, "full_suite": full_suite}
-        )
-        # Write to a temp file and rename over the target -- os.replace is atomic on POSIX and
-        # Windows, so a concurrent reader (nsflow polling this same file) always sees either the
-        # complete old content or the complete new content, never a half-written file.
-        tmp_path = f"{path}.tmp"
-        with open(tmp_path, "w", encoding="utf-8") as progress_file:
-            for row in rows:
-                progress_file.write(json.dumps(row) + "\n")
-        os.replace(tmp_path, path)
-        _PROGRESS_PATHS_WRITTEN.add(path)
-
-
-def _progress_chart_writer(
-    network_name: str, is_subset_check: bool, total_fixture_count: int
-) -> Callable[[dict, int], None]:
-    """Return a run_all_tests on_result callback that updates the current batch's bar as each
-    test finishes: the first test shows e.g. 1/1, the second 1/2 or 2/2, and so on, up to the
-    batch's full size -- call _start_progress_batch first so this batch gets its own bar. A
-    subset check's fixtures outside the batch are assumed still passing, so both the running
-    numerator and denominator start from that baseline (total_fixture_count minus this batch's
-    size) instead of zero."""
-    state = {"done": 0, "passed": 0}
-
-    def on_result(result: dict, batch_size: int) -> None:
-        state["done"] += 1
-        state["passed"] += 1 if result["passed"] else 0
-        baseline = (total_fixture_count - batch_size) if is_subset_check else 0
-        _write_progress(
-            network_name,
-            baseline + state["passed"],
-            baseline + state["done"],
-            state["done"] == batch_size,
-            full_suite=not is_subset_check,
-        )
-
-    return on_result
-
-
 # One-shot cache: a UI-triggered "Generate Tests" run (max_iterations=0) tests the fresh
 # fixtures once anyway, so a UI-triggered "Self-Improve" launched right after can reuse that
 # result as its own iteration 1 instead of paying to re-run every fixture a second time. Gated
@@ -462,9 +827,9 @@ def _gentests_cache_fingerprint(network_name: str, hocon_path: str) -> str:
     hasher = hashlib.sha256()
     with open(hocon_path, encoding="utf-8") as hocon_file:
         hasher.update(hocon_file.read().encode("utf-8"))
-    for fixture_path in _fixture_paths(network_name):
-        hasher.update(fixture_path.encode("utf-8"))
-        with open(fixture_path, encoding="utf-8") as fixture_file:
+    for path in fixture_paths(network_name):
+        hasher.update(path.encode("utf-8"))
+        with open(path, encoding="utf-8") as fixture_file:
             hasher.update(fixture_file.read().encode("utf-8"))
     return hasher.hexdigest()
 
@@ -472,10 +837,10 @@ def _gentests_cache_fingerprint(network_name: str, hocon_path: str) -> str:
 def _save_gentests_cache(network_name: str, hocon_path: str, results: list) -> None:
     """Cache a generate-tests-only run's results, fingerprinted to the network's current content,
     for one-shot reuse by the next Self-Improve run against this exact network. Also copies each
-    fixture's consolidated thinking trace (see test_runner.IMPROVEMENT_THINKING_DIR) -- without
-    it, a self-improve run that skips its own re-test would leave the diagnosing sub-agents with
-    only the bare assertion message instead of the full per-agent reasoning a fresh run gives
-    them via read_thinking_trace."""
+    fixture's consolidated thinking trace (see IMPROVEMENT_THINKING_DIR) -- without it, a
+    self-improve run that skips its own re-test would leave the diagnosing sub-agents with only
+    the bare assertion message instead of the full per-agent reasoning a fresh run gives them
+    via read_thinking_trace."""
     results_path, thinking_dir = _gentests_cache_paths(network_name)
     tmp_path = f"{results_path}.tmp"
     with open(tmp_path, "w", encoding="utf-8") as results_file:
@@ -534,6 +899,7 @@ def extract_prefixed(response: str, prefix: str) -> list[str]:
     return [
         line[len(prefix) :].strip() for line in (response or "").splitlines() if line.strip().startswith(prefix)
     ]
+
 
 # Signature of consultant retrying a tool call that can never succeed -- e.g. when the
 # target network's HOCON uses a style (no root braces, "=" instead of ":") that
@@ -595,7 +961,7 @@ def normalize_hocon_reference(value: str) -> str:
     return path.as_posix()
 
 
-def consult(session, thread: dict, message: str, hocon_file: str, fixture_paths: dict[str, str]) -> tuple:
+def consult(session, thread: dict, message: str, hocon_file: str, fixture_paths_: dict[str, str]) -> tuple:
     """
     Send one diagnosis/follow-up message to consultant, and keep answering any
     NEEDS_CLARIFICATION questions it comes back with (asking the actual person running this
@@ -603,13 +969,13 @@ def consult(session, thread: dict, message: str, hocon_file: str, fixture_paths:
 
     :return: (final_response_text, updated_thread)
     """
-    logger.info("consult start: hocon_file=%s fixtures=%d", hocon_file, len(fixture_paths))
+    logger.info("consult start: hocon_file=%s fixtures=%d", hocon_file, len(fixture_paths_))
     response, thread = _guarded_chat(
         session,
         thread,
         message,
         hocon_file,
-        sly_data={"agent_network_hocon_file": hocon_file, "test_fixture_paths": fixture_paths},
+        sly_data={"agent_network_hocon_file": hocon_file, "test_fixture_paths": fixture_paths_},
     )
     while True:
         questions = extract_prefixed(response, CLARIFICATION_PREFIX)
@@ -649,17 +1015,9 @@ def _consult_all_passing(session, thread: dict, direction: str, total_fixture_co
         logger.error("consultant call failed unexpectedly: %s: %s", type(exc).__name__, exc)
 
 
-def _fixture_paths(network_name: str) -> list[str]:
-    """Sorted paths of every generated fixture under tests/fixtures/<network_name>/, if any.
-    Sorted so a fingerprint hashing these in order is stable regardless of directory listing
-    order."""
-    search_dir = os.path.join("tests", "fixtures", network_name)
-    return sorted(glob.glob(os.path.join(search_dir, "*.hocon")))
-
-
 def has_existing_fixtures(network_name: str) -> bool:
     """Whether tests/fixtures/<network_name>/ already has any generated fixture."""
-    return bool(_fixture_paths(network_name))
+    return bool(fixture_paths(network_name))
 
 
 def diagnosis_prompt(failures: list, direction: str, total_fixture_count: int, is_subset_check: bool) -> str:
@@ -717,7 +1075,6 @@ def main():  # pylint: disable=too-many-locals,too-many-statements,too-many-bran
     # flood the output -- only this app's own loggers are bumped to INFO.
     logging.basicConfig(level=logging.WARNING, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
     logger.setLevel(logging.INFO)
-    logging.getLogger("apps.network_consultant.test_runner").setLevel(logging.INFO)
     # Re-announces every "serve": false manifest entry (26 of them) at WARNING level, on every
     # session open -- real but useless noise for this tool, drowning out our own progress logs.
     logging.getLogger("ServedManifestConfigFilter").setLevel(logging.ERROR)
@@ -734,7 +1091,8 @@ def main():  # pylint: disable=too-many-locals,too-many-statements,too-many-bran
         "--success-ratio",
         default=CONFIDENT_SUCCESS_RATIO,
         help=f"Ratio (e.g. 'N/M') a fixture is bumped to once consultant is CONFIDENT its fix holds up "
-        f"under repeated runs (default: {CONFIDENT_SUCCESS_RATIO}). Everything else stays cheap.",
+        f"under repeated runs (default: {CONFIDENT_SUCCESS_RATIO}). Everything else stays cheap, and the "
+        f"Before/After bars always score on each fixture's own ratio.",
     )
     parser.add_argument(
         "--connection",
@@ -829,6 +1187,15 @@ def main():  # pylint: disable=too-many-locals,too-many-statements,too-many-bran
     try:
         best_failure_count = None
         stale_rounds = 0
+        # Tracked apart from the two above, which only ever see full-suite results: a subset
+        # re-check's failure count is not comparable with the whole suite's, and running out of
+        # ideas on a subset ends the subset, not the run. See the go-wide block below.
+        subset_best_failure_count = None
+        subset_stale_rounds = 0
+        progress_tracker = _ProgressTracker()
+        # Only the fix rounds are numbered on the chart's x-axis; the Before/After bookends are
+        # labelled by name instead, so they don't consume an iteration number.
+        improvement_iteration = 0
         # hocon_file is registries-relative; the snapshot below is the file text that produced
         # the best score so far, so a plateau can roll the later dead-end edits back off.
         hocon_path = os.path.join("registries", hocon_file)
@@ -843,12 +1210,12 @@ def main():  # pylint: disable=too-many-locals,too-many-statements,too-many-bran
             # no test run at all.
             if NSFLOW_JOB_ID and NSFLOW_JOB_DIR:
                 logger.info("Baseline check (Generate Tests, no fix loop)...")
-                _start_progress_batch(network_name)
-                results = run_all_tests(
-                    network_name, on_result=_progress_chart_writer(network_name, False, None)
-                )
+                results = run_all_tests(network_name)
                 _save_gentests_cache(network_name, hocon_path, results)
                 failures = [r for r in results if not r["passed"]]
+                # Its own bar, not a Before: "Before" belongs to the Self-Improve run, which
+                # reuses this very result (via the gentests cache) to draw it there.
+                progress_tracker.record(results, "generated", len(results))
                 logger.info("Baseline: %d/%d passing.", len(results) - len(failures), len(results))
             return
 
@@ -863,7 +1230,6 @@ def main():  # pylint: disable=too-many-locals,too-many-statements,too-many-bran
         for iteration in range(1, args.max_iterations + 1):
             logger.info("--- Iteration %d/%d: running tests ---", iteration, args.max_iterations)
             is_subset_check = retest_only is not None
-            _start_progress_batch(network_name)
             cached_results = (
                 _load_gentests_cache(network_name, hocon_path)
                 if iteration == 1 and NSFLOW_JOB_ID and NSFLOW_JOB_DIR
@@ -872,13 +1238,8 @@ def main():  # pylint: disable=too-many-locals,too-many-statements,too-many-bran
             if cached_results is not None:
                 logger.info("Reusing the Generate Tests baseline (network unchanged since) -- skipping re-test.")
                 results = cached_results
-                _write_progress(network_name, sum(1 for r in results if r["passed"]), len(results), True)
             else:
-                results = run_all_tests(
-                    network_name,
-                    only_fixtures=retest_only,
-                    on_result=_progress_chart_writer(network_name, is_subset_check, total_fixture_count),
-                )
+                results = run_all_tests(network_name, only_fixtures=retest_only)
             if not is_subset_check:
                 total_fixture_count = len(results)
             infrastructure_errors = [result for result in results if result.get("infrastructure_error")]
@@ -887,6 +1248,11 @@ def main():  # pylint: disable=too-many-locals,too-many-statements,too-many-bran
                 for error in infrastructure_errors:
                     logger.error("  - %s: %s", error["fixture"], error["message"])
                 return
+            if iteration == 1:
+                progress_tracker.record(results, "before", total_fixture_count)
+            else:
+                improvement_iteration += 1
+                progress_tracker.record(results, "iteration", total_fixture_count, improvement_iteration)
             failures = [r for r in results if not r["passed"]]
             logger.info(
                 "%d/%d fixtures passing%s.",
@@ -904,18 +1270,22 @@ def main():  # pylint: disable=too-many-locals,too-many-statements,too-many-bran
             # total_fixture_count is fixed at the full-suite size (set on the first, non-subset
             # iteration) -- a subset re-check's "passed" is everything outside that subset (assumed
             # still passing) plus whatever of the subset just passed, so the chart's denominator
-            # never shrinks and passing count only ever grows toward it. The on_result callback
-            # above already wrote a row for every fixture in this batch, including this final tally.
+            # never shrinks: the tracker above carries fixtures this round didn't run forward at
+            # their last known state instead of dropping them out of the chart entirely.
 
             if not failures:
                 if retest_only is not None:
                     logger.info("Subset re-check passed; running full suite once to confirm no regressions...")
-                    _start_progress_batch(network_name)
-                    results = run_all_tests(
-                        network_name, on_result=_progress_chart_writer(network_name, False, total_fixture_count)
-                    )
+                    results = _run_real_ratio_suite(network_name, original_ratios, args.success_ratio)
                     total_fixture_count = len(results)
+                    infrastructure_errors = [result for result in results if result.get("infrastructure_error")]
+                    if infrastructure_errors:
+                        logger.error("Full-suite confirmation could not complete because test infrastructure failed.")
+                        for error in infrastructure_errors:
+                            logger.error("  - %s: %s", error["fixture"], error["message"])
+                        return
                     failures = [r for r in results if not r["passed"]]
+                    progress_tracker.record(results, "after", total_fixture_count)
                     _commit_hocon_version(
                         git_worktree,
                         hocon_file,
@@ -930,7 +1300,9 @@ def main():  # pylint: disable=too-many-locals,too-many-statements,too-many-bran
                                 f"(>= {GOOD_ENOUGH_RATIO:.0%}) on the full suite -- good enough, moving on."
                             )
                             for failure in failures:
-                                logger.info("  - still failing: %s: %s", failure["fixture"], failure["message"].strip())
+                                logger.info(
+                                    "  - still failing: %s: %s", failure["fixture"], failure["message"].strip()
+                                )
                             return
                         # Not good enough -- regressions elsewhere in the suite; keep going against those.
                         retest_only = None
@@ -940,22 +1312,38 @@ def main():  # pylint: disable=too-many-locals,too-many-statements,too-many-bran
                     logger.info("All tests passing. Network is satisfiable.")
                     with open(hocon_path, encoding="utf-8") as before_file:
                         hocon_before_consult = before_file.read()
-                    _consult_all_passing(consultant_session, consultant_thread, direction, total_fixture_count, hocon_file)
+                    _consult_all_passing(
+                        consultant_session, consultant_thread, direction, total_fixture_count, hocon_file
+                    )
                     with open(hocon_path, encoding="utf-8") as after_file:
                         hocon_after_consult = after_file.read()
                     if hocon_after_consult == hocon_before_consult:
                         # consultant made no edit (e.g. it had nothing to do) -- the full
                         # suite already passed just before this call, so re-running it again would
                         # burn a whole extra round of fixture tests to reconfirm an unchanged file.
-                        logger.info("consultant made no changes; skipping the redundant re-verification run.")
+                        # The one exception: a CONFIDENT_FIX bump is in force, so that run scored
+                        # some fixtures at the stricter ratio -- not the real score an After bar
+                        # reports, so it does have to be redone on the fixtures' own ratios.
+                        if original_ratios:
+                            logger.info("consultant made no changes; re-scoring the full suite on the fixtures' "
+                                        "own ratios for the After bar.")
+                            results = _run_real_ratio_suite(network_name, original_ratios, args.success_ratio)
+                            total_fixture_count = len(results)
+                        else:
+                            logger.info("consultant made no changes; skipping the redundant re-verification run.")
+                        progress_tracker.record(results, "after", total_fixture_count)
                         return
                     logger.info("Re-running full suite to verify that change didn't break anything...")
-                    _start_progress_batch(network_name)
-                    results = run_all_tests(
-                        network_name, on_result=_progress_chart_writer(network_name, False, total_fixture_count)
-                    )
+                    results = _run_real_ratio_suite(network_name, original_ratios, args.success_ratio)
                     total_fixture_count = len(results)
+                    infrastructure_errors = [result for result in results if result.get("infrastructure_error")]
+                    if infrastructure_errors:
+                        logger.error("Final confirmation could not complete because test infrastructure failed.")
+                        for error in infrastructure_errors:
+                            logger.error("  - %s: %s", error["fixture"], error["message"])
+                        return
                     failures = [r for r in results if not r["passed"]]
+                    progress_tracker.record(results, "after", total_fixture_count)
                     _commit_hocon_version(
                         git_worktree,
                         hocon_file,
@@ -980,29 +1368,92 @@ def main():  # pylint: disable=too-many-locals,too-many-statements,too-many-bran
                     retest_only = None
                     is_subset_check = False
 
-            improved = best_failure_count is None or len(failures) < best_failure_count
-            if best_failure_count is not None and len(failures) >= best_failure_count:
-                stale_rounds += 1
-            else:
-                stale_rounds = 0
-            best_failure_count = (
-                min(len(failures), best_failure_count) if best_failure_count is not None else len(failures)
-            )
-            if improved:
-                # Snapshot the HOCON that produced this best-so-far score -- read now, before the
-                # editor touches it again, so a later plateau can roll the useless edits back off.
-                # Iteration 1 snapshots the original, which is the right floor to fall back to.
-                with open(hocon_path, encoding="utf-8") as best_file:
-                    best_hocon_text = best_file.read()
-                best_hocon_iteration = iteration
+            # A subset that has stopped improving is a reason to stop trusting the subset, not to
+            # end the run. Edits made while focused on a handful of fixtures regress ones the
+            # subset never runs -- and the chart has been extrapolating over those for rounds. So
+            # go wide: measure everything, chart that as an authoritative After bar, and keep
+            # going against whatever is really failing.
+            if is_subset_check and subset_stale_rounds >= PLATEAU_STRIKES:
+                logger.warning(
+                    "The failing subset hasn't improved for %d rounds; re-checking the whole suite.",
+                    PLATEAU_STRIKES,
+                )
+                results = _run_real_ratio_suite(network_name, original_ratios, args.success_ratio)
+                infrastructure_errors = [result for result in results if result.get("infrastructure_error")]
+                if infrastructure_errors:
+                    logger.error("Full-suite re-check could not complete because test infrastructure failed.")
+                    for error in infrastructure_errors:
+                        logger.error("  - %s: %s", error["fixture"], error["message"])
+                    return
+                total_fixture_count = len(results)
+                failures = [r for r in results if not r["passed"]]
+                passed_count = total_fixture_count - len(failures)
+                progress_tracker.record(results, "after", total_fixture_count)
+                _commit_hocon_version(
+                    git_worktree, hocon_file, f"After: {passed_count}/{total_fixture_count} passing"
+                )
+                logger.info("Full suite: %d/%d passing.", passed_count, total_fixture_count)
+                if _good_enough(passed_count, total_fixture_count):
+                    print(
+                        f"[network_consultant] {passed_count}/{total_fixture_count} passing "
+                        f"(>= {GOOD_ENOUGH_RATIO:.0%}) on the full suite -- good enough, moving on."
+                    )
+                    for failure in failures:
+                        logger.info("  - still failing: %s: %s", failure["fixture"], failure["message"].strip())
+                    return
+                # Under the bar, so carry on -- against the real failures now, not the stuck
+                # subset. Whether THAT has run out of road is the full-suite bookkeeping's call.
+                logger.warning(
+                    "%d/%d passing is below %.0f%%; continuing against the full set of failures.",
+                    passed_count,
+                    total_fixture_count,
+                    GOOD_ENOUGH_RATIO * 100,
+                )
+                retest_only = None
+                is_subset_check = False
+                subset_best_failure_count = None
+                subset_stale_rounds = 0
 
+            if is_subset_check:
+                # Strictly separate from the full-suite counters: "1 of 1 failing" is not an
+                # improvement on "3 of 6", so a subset must never move best_failure_count, take
+                # the HOCON snapshot, or vote on giving up. Its strikes send the loop wide above.
+                if subset_best_failure_count is not None and len(failures) >= subset_best_failure_count:
+                    subset_stale_rounds += 1
+                else:
+                    subset_stale_rounds = 0
+                subset_best_failure_count = (
+                    min(len(failures), subset_best_failure_count)
+                    if subset_best_failure_count is not None
+                    else len(failures)
+                )
+            else:
+                improved = best_failure_count is None or len(failures) < best_failure_count
+                if best_failure_count is not None and len(failures) >= best_failure_count:
+                    stale_rounds += 1
+                else:
+                    stale_rounds = 0
+                best_failure_count = (
+                    min(len(failures), best_failure_count) if best_failure_count is not None else len(failures)
+                )
+                if improved:
+                    # Snapshot the HOCON that produced this best-so-far score -- read now, before
+                    # the editor touches it again, so a later plateau can roll the useless edits
+                    # back off. Iteration 1 snapshots the original: the right floor to fall back to.
+                    with open(hocon_path, encoding="utf-8") as best_file:
+                        best_hocon_text = best_file.read()
+                    best_hocon_iteration = iteration
+
+            # Only full-suite rounds ever reach PLATEAU_STRIKES here (subsets are handled above),
+            # so this is the whole network genuinely refusing to move -- the one case that ends
+            # the run below 80% instead of iterating again.
             if stale_rounds >= PLATEAU_STRIKES:
                 print(
                     f"[network_consultant] Tried hard for {iteration} rounds, but this isn't working -- "
-                    f"{len(failures)}/{len(results)} fixtures still failing. Giving up here."
+                    f"{len(failures)}/{len(results)} fixtures still failing on the full suite. Giving up here."
                 )
                 logger.warning(
-                    "No improvement for %d consecutive rounds. Stopping with %d/%d still failing:",
+                    "No full-suite improvement for %d consecutive rounds. Stopping with %d/%d still failing:",
                     PLATEAU_STRIKES,
                     len(failures),
                     len(results),
@@ -1010,6 +1461,13 @@ def main():  # pylint: disable=too-many-locals,too-many-statements,too-many-bran
                 for failure in failures:
                     logger.warning("  - %s: %s", failure["fixture"], failure["message"].strip())
                 _restore_best_hocon(hocon_path, best_hocon_text, best_hocon_iteration)
+                logger.info("Re-running the full suite on the restored best version for the final After bar...")
+                results = _run_real_ratio_suite(network_name, original_ratios, args.success_ratio)
+                infrastructure_errors = [result for result in results if result.get("infrastructure_error")]
+                if not infrastructure_errors:
+                    progress_tracker.record(results, "after", len(results))
+                else:
+                    logger.error("Final confirmation could not complete because test infrastructure failed.")
                 return
 
             logger.info("Consulting consultant to fix failing agents' instructions...")
@@ -1075,6 +1533,13 @@ def main():  # pylint: disable=too-many-locals,too-many-statements,too-many-bran
 
         logger.warning("Reached max iterations (%d) without a full pass.", args.max_iterations)
         _restore_best_hocon(hocon_path, best_hocon_text, best_hocon_iteration)
+        logger.info("Re-running the full suite on the restored best version for the final After bar...")
+        results = _run_real_ratio_suite(network_name, original_ratios, args.success_ratio)
+        infrastructure_errors = [result for result in results if result.get("infrastructure_error")]
+        if not infrastructure_errors:
+            progress_tracker.record(results, "after", len(results))
+        else:
+            logger.error("Final confirmation could not complete because test infrastructure failed.")
     finally:
         logger.info("Restoring original success_ratio values...")
         restore_success_ratios(original_ratios)

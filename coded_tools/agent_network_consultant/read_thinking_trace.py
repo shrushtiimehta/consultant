@@ -25,7 +25,7 @@ from neuro_san.interfaces.coded_tool import CodedTool
 
 from coded_tools.agent_network_editor.and_logger import AndLogger
 
-# Matches apps/network_consultant/test_runner.py's IMPROVEMENT_THINKING_DIR and the
+# Matches apps/network_consultant/runner.py's IMPROVEMENT_THINKING_DIR and the
 # "--- <agent_origin> ---" section headers _write_consolidated_thinking writes.
 THINKING_DIR = Path("logs/thinking_dir/improvement").resolve()
 SECTION_HEADER = re.compile(r"^--- (.+) ---$", re.MULTILINE)
@@ -43,7 +43,7 @@ class ReadThinkingTrace(CodedTool):
     """
     CodedTool that lets the consultant's diagnosing sub-agents (network_behavior_fixer,
     fixture_expectation_fixer, structural_change_assessor) read back the per-agent reasoning
-    trace saved for a failing fixture (see apps/network_consultant/test_runner.py's
+    trace saved for a failing fixture (see apps/network_consultant/runner.py's
     _write_consolidated_thinking), instead of every agent's full trace being force-fed into its
     context up front. Call with no `agent_name` first to see which agents have a trace worth
     reading; call again with `agent_name` to fetch that one agent's trace. Fixture-scoped only --
