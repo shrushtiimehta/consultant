@@ -191,9 +191,7 @@ class WriteAllInstructions(BranchActivation, CodedTool):
     def _apply_writer_response(agent_name: str, response: str, sly_data: dict[str, Any]) -> str:
         """
         Parse one writer's JSON answer and write its fields into the
-        agent_network_definition — the apply logic that previously lived in the
-        set_agent_instructions/set_agent_description setter tools, minus the
-        model round trips that drove them.
+        agent_network_definition.
 
         Must stay synchronous (no awaits): the N concurrent writers share this
         sly_data without a lock, and what makes that safe is that this method

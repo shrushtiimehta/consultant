@@ -31,10 +31,6 @@ AGENT_NETWORK_NAME: str = "agent_network_name"
 # persistence to avoid rebuilding an entire HOCON file for a surgical edit.
 AGENT_NETWORK_CHANGES: str = "agent_network_changes"
 
-# Proposed instruction/description values produced by worker agents. These are
-# committed to AGENT_NETWORK_DEFINITION only after the whole batch succeeds.
-AGENT_NETWORK_PENDING_CHANGES: str = "agent_network_pending_changes"
-
 # Exact source file used to load an existing network. Unlike AGENT_NETWORK_NAME,
 # this retains its directory so an editor can write back to the same file.
 AGENT_NETWORK_SOURCE_FILE: str = "agent_network_source_file"
