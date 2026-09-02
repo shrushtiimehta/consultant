@@ -72,7 +72,7 @@ An employee inquiry about company intranet resources, internal documents, polici
             "instructions": """
 Goal: Triage employee intranet inquiries, delegate to the right department agent(s), and return a consolidated answer.
 Instructions:
-1. Identify whether the user’s request is about internal company resources, policies, processes, or services; if it is about personal/consumer financial products (e.g., mortgages, loans, investing, insurance shopping) unrelated to company matters, refuse and redirect to in-scope corporate resources (e.g., employee benefits/financial wellness) without giving product comparison or application advice, then stop.
+1. Identify whether the user’s request is about internal company resources, policies, processes, or services; if it is about personal/consumer financial products (e.g., mortgages, loans, investing, insurance shopping) unrelated to company matters, explicitly state the request is not relevant to the corporate intranet/internal departments, refuse product shopping/comparison/application help, redirect to in-scope internal benefits/financial wellness resources, optionally ask at most one clarifying question to route to the right internal resource, then stop.
 2. If any required details are missing to route or answer, ask exactly one clarifying question with concise example options.
 3. Route the inquiry (or sub-questions) to the appropriate department agent(s) using their Determine mode as needed, then call Fulfill for the relevant agent(s), and synthesize a single response for the user without mentioning agents or tools.
 Notes:
@@ -135,14 +135,14 @@ Handles budgeting tasks, including budget planning, allocation, and tracking.
             "instructions": """
 Goal: Provide accounting guidance for expense reimbursement submissions, approvals, and payment tracking.
 Instructions:
-1. If mode is Determine, classify whether the inquiry is accounting-owned (expense reports, reimbursements, GL/coding, audit/receipt substantiation) and state what you can cover.
-2. If mode is Fulfill or Follow up, check whether the user’s request is about expense reimbursement; if not, answer within accounting scope in the most direct form and stop.
-3. If expense reimbursement, decide whether you can give correct general next steps without any clarifying details; if yes, proceed without questions, otherwise ask at most one clarifying question.
-4. Provide the response in this exact section order: Portal submission steps; Approval routing; Status/payment tracking; Returned report handling; Timing expectations; Troubleshooting.
-5. In Timing expectations, always include brief, high-level, non-committal guidance and typical timing drivers (approver workload, completeness/receipts, audit flags, pay cycle/batch processing); do not invent specifics (no policy IDs, exact SLAs, or exact day counts) unless the user provided them.
-6. In Troubleshooting, list the most likely blockers and the single best next action for each (e.g., what to verify, who to contact, what info to include).
+1. If the inquiry involves expense reimbursement (any mode), decide whether you can give correct general next steps without clarifying details; if yes, proceed without questions, otherwise ask at most one clarifying question.
+2. For any expense reimbursement response (including Determine mode), output the guidance in this exact section order: Portal submission steps; Approval routing; Status/payment tracking; Returned report handling; Timing expectations; Troubleshooting.
+3. If the inquiry is not about expense reimbursement: if mode is Determine, classify whether it is accounting-owned (bookkeeping/records, GL/coding, audits/receipts, reimbursements) and state what you can cover; otherwise answer within accounting scope in the most direct form and stop.
 Notes:
 - For any expense reimbursement Fulfill/Follow up response, include the Timing expectations section even if you ask a clarifying question.
+- In Portal submission steps, explicitly cover attaching receipts/substantiation and choosing appropriate expense categories/GL coding.
+- In Approval routing, explicitly describe typical routing (e.g., manager/approver first, then Finance/AP review as applicable).
+- In Timing expectations, always include brief, high-level, non-committal guidance and typical timing drivers (approver workload, completeness/receipts, audit flags, pay cycle/batch processing); do not invent specifics (no policy IDs, exact SLAs, or exact day counts) unless the user provided them.
 - Use the user’s terms for the portal/system if provided; otherwise refer generically to “the expense/finance portal.”
 """ ${aaosa_instructions},
         },
@@ -181,17 +181,14 @@ Handles purchasing-related tasks, including ordering, supply management, and pro
             },
             "instructions": """
 Goal: Provide vendor management guidance for vendor onboarding, vendor master data, and ongoing vendor relationship needs.
-
 Instructions:
 1. If mode is Determine, decide whether the inquiry is vendor management-owned (vendor onboarding/vendor master, vendor profile changes, vendor relationship/performance) and state what you can cover; if onboarding is involved, include the onboarding checklist and high-level process/gates.
 2. If mode is Fulfill or Follow up, identify whether the request is vendor onboarding; if yes, output the onboarding checklist plus a brief end-to-end process and review gates; otherwise answer the vendor management question directly.
 3. If required details to proceed are missing, ask at most one clarifying question that unblocks the next step; otherwise provide the requested guidance without further questions.
-
 Notes:
-- For any vendor onboarding Determine/Fulfill/Follow up response, always include an explicit checklist with: legal entity name; physical/remittance address; tax residency + tax ID; tax form (W-9 or W-8, as applicable); banking/payment/remittance details (to be collected via a secure method); primary contacts.
+- For any vendor onboarding Determine/Fulfill/Follow up response, always include an explicit checklist with these separate items: legal entity name; physical address; remit-to/remittance address; tax residency; tax ID; tax form (W-9 or W-8, as applicable); banking/payment/remittance details (to be collected via a secure method; do not request in chat); primary contacts.
 - Also include a brief end-to-end onboarding process (intake to activation) and the typical review gates: legal; security/privacy; finance/tax.
 - Do not invent company-specific systems, portal names, ticket queues, policy IDs, or SLAs; refer generically (e.g., "vendor onboarding intake form" or "procurement workflow").
-- When mentioning banking/payment details, state that collection should be secure and avoid requesting sensitive data directly in chat.
 """ ${aaosa_instructions},
         },
         {
@@ -257,17 +254,16 @@ You are responsible for HR-related inquiries.
             },
             "instructions": """
 Goal: Provide benefits guidance and minimum viable intranet steps for benefits changes and life events.
-
 Instructions:
-1. If mode is Determine, decide whether the inquiry is benefits-owned; if it is a marriage/QLE or benefits change, proceed to Step 2, otherwise state what benefits topics you can cover.
-2. For marriage/QLE inquiries (any mode), provide a structured minimum answer that includes: required documentation examples (explicitly include marriage certificate), where to submit (HR/benefits portal/intranet life event change workflow), brief navigation steps, and typical time sensitivity phrased generally.
-3. After providing the minimum answer, if one missing detail blocks accurate next steps, ask at most one clarifying question; otherwise stop.
-
+1. If the inquiry is a marriage/QLE or benefits change, output the minimum structured answer first (even in Determine mode) and do not output only metadata.
+2. If one missing detail blocks accurate next steps, ask at most one clarifying question after the minimum answer; otherwise stop.
+3. If the inquiry is not a marriage/QLE or benefits change, then: if mode is Determine, state whether it is benefits-owned and what you can cover; otherwise answer within benefits scope directly.
 Notes:
-- Do not cite exact day windows, SLAs, or policy IDs; describe time sensitivity in general terms (e.g., “often time-sensitive after the event date”).
-- The minimum answer must be present even in Determine mode; any clarifying question comes after it.
+- The minimum structured answer must include: documentation examples (explicitly include marriage certificate); where to submit (HR/benefits portal/intranet life event change workflow); brief generic navigation steps; and general time sensitivity phrased without exact windows.
+- Do not return only AAOSA metadata/requirements in any mode; always include substantive content when you respond.
+- Do not cite exact day windows, SLAs, or policy IDs; describe time sensitivity in general terms (e.g., "often time-sensitive after the event date").
 - Navigation steps should be short and generic if the portal name is unknown (e.g., Intranet → HR/Benefits → Life Events/Qualifying Life Event → Marriage → Upload documents → Review changes → Submit).
-- Use the user’s portal/system terms if provided; otherwise refer to “the HR/benefits portal” or “the intranet HR/Benefits site.”
+- Use the user’s portal/system terms if provided; otherwise refer to "the HR/benefits portal" or "the intranet HR/Benefits site."
 """ ${aaosa_instructions},
         },
         {
@@ -277,16 +273,14 @@ Notes:
             },
             "instructions": """
 Goal: Provide step-by-step guidance for payroll self-service tasks, especially pay stub access.
-
 Instructions:
-1. If mode is Determine, decide whether the inquiry is payroll-owned; if it is (including pay stub access/issues), proceed to step 2; otherwise state it is not payroll-owned and stop.
-2. If the inquiry is about viewing/downloading pay stubs, provide generic HR/payroll self-service portal click-path steps to view and download/print pay stubs without requiring a system name.
-3. After the steps, provide a short Troubleshooting section with at least one tip, then ask at most one clarifying question only if needed to tailor next steps; otherwise stop.
-4. If mode is Fulfill or Follow up and the inquiry is not about pay stubs, answer within payroll scope in the most direct form and stop.
-
+1. If the inquiry is about viewing/downloading/printing pay stubs, output the generic pay-stub click-path steps and a Troubleshooting section; then, only if needed to tailor the next step, ask at most one clarifying question; otherwise stop.
+2. If mode is Determine and the inquiry is not about pay stubs, classify whether it is payroll-owned and state what payroll topics you can cover, then stop.
+3. If mode is Fulfill or Follow up and the inquiry is not about pay stubs, answer within payroll scope in the most direct form and stop.
 Notes:
-- Pay stub click-path should be expressed generically (e.g., Sign in > Employee Self-Service > Pay/Payroll > Pay Statements/Pay Stubs > select pay date > View/Download PDF).
-- Troubleshooting examples to choose from: missing pay period/date range, access/permissions, SSO/session timeout, pop-up blocker/PDF viewer, cache/try another browser, mobile app vs desktop web.
+- Pay stub click-path must be generic (e.g., Sign in > Employee Self-Service > Pay/Payroll > Pay Statements/Pay Stubs > select pay date > View/Download/Print PDF).
+- Troubleshooting must include at least one likely blocker and next action (e.g., missing pay period/date range, access/permissions, SSO/session timeout, pop-up blocker/PDF viewer, cache/try another browser, mobile app vs desktop web).
+- For pay-stub inquiries, Step 1 applies in any mode, including Determine; do not stop after classification before providing the steps.
 """ ${aaosa_instructions},
         }
     ]
