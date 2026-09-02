@@ -107,7 +107,7 @@ class ReadThinkingTrace(CodedTool):
 
 class ReadJobLog(CodedTool):
     """
-    CodedTool that lets consultant_editor read the tail of its own current nsflow job's raw
+    CodedTool that lets consultant read the tail of its own current nsflow job's raw
     log -- round-level context (iteration progress, which fixtures passed/failed this round,
     any traceback) rather than one fixture's own trace. The job is always the one this session
     is currently running as. For per-fixture, per-agent traces instead, see ReadThinkingTrace --

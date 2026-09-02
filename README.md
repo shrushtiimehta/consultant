@@ -1,17 +1,18 @@
 # network-designer-toolkit
 
-An overlay project on top of the [`neuro-san-studio`](https://github.com/cognizant-ai-lab/neuro-san-studio)
-framework (installed via `pip`, not git-cloned). It brings just the agent-network
-designer/editor/consultant tooling:
+A fork of [`neuro-san-studio`](https://github.com/cognizant-ai-lab/neuro-san-studio) with the
+agent-network designer/editor/consultant tooling vendored in. `neuro-san` and `nsflow` are still
+PyPI dependencies (see `requirements.txt`); the studio itself is this checkout. The tooling:
 
 - `registries/agent_network_designer.hocon` — creates/modifies agent networks from a use-case description.
 - `registries/agent_network_editor.hocon`, `agent_network_instructions_editor.hocon`,
   `agent_network_query_generator.hocon` — the designer's own support networks.
 - `registries/agent_network_test_generator.hocon` (ANTeGen) — generates data-driven test fixtures for a network.
-- `registries/agent_network_consultant_editor.hocon` — given a failing-test report for an existing network,
+- `registries/agent_network_consultant.hocon` — given a failing-test report for an existing network,
   fixes the responsible agent instructions, corrects bad test fixtures, delegates structural changes, and (when
   asked to reduce token usage) simplifies hierarchy/verbosity or suggests coded-tool conversions.
-- `apps/network_consultant/` — iterative test-and-fix loop driven by `agent_network_consultant_editor`.
+- `apps/network_consultant/` — iterative test-and-fix loop driven by `agent_network_consultant`.
+  Generated fixtures land in `tests/fixtures/<network path>/`.
 
 This is tooling, plus one example network to try it against:
 `registries/basic/coffee_finder.hocon` — five AAOSA agents that answer "where can I get coffee
@@ -23,10 +24,10 @@ right now?" based on the time of day. Use it to see the loop work end to end bef
 Do these in order. Steps 2 and 3 must come after step 1, or `uv sync` will reinstall the
 PyPI copies over your forks.
 
-### 1. This repo and `neuro-san-studio`
+### 1. This repo
 
-`neuro-san-studio` is a normal PyPI dependency declared in `pyproject.toml` — it is not
-git-cloned. Installing this project pulls it in, along with `neuro-san` and `nsflow`:
+This repo *is* the studio, so there is nothing to clone alongside it. Installing it pulls in
+`neuro-san` and `nsflow` from PyPI:
 
 ```bash
 git clone https://github.com/shrushtiimehta/consultant.git
@@ -150,6 +151,7 @@ Useful flags — full list via `--help`:
 | `--max-iterations N` | Cap on test-and-fix rounds. |
 | `--success-ratio N/M` | Ratio a fixture is bumped to once the fix is judged confident (default `3/3`). |
 | `--connection {direct,http}` | `direct` (default) runs in-process, no server. `http` talks to a running `ns run`. |
+| `--git-versions` | Commit each tested version of the network hocon to a `consultant-versions/<network>/<run-id>` branch and push to `origin`. Off by default — it pushes repeatedly during the run. |
 
 ## Notes
 

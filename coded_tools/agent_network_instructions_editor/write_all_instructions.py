@@ -212,7 +212,12 @@ class WriteAllInstructions(BranchActivation, CodedTool):
             the existing text through the model. An empty object is the
             writer's documented no-op ("no change needed") and succeeds
             without writing anything.
-        :param sly_data: Carries the agent_network_definition to update.
+        :param sly_data: Carries the agent_network_definition to update. Also gains/extends
+            AGENT_NETWORK_CHANGES ({agent_name: {field: value}}) for every field actually
+            written, so source-preserving persistence (see
+            AgentNetworkPersistenceMiddleware.preserve_source_hocon) knows exactly what to
+            patch without rebuilding the whole file. Callers that don't use that persistence
+            mode simply never read this key -- purely additive.
         :return: "" on success, or an "Error: ..." string.
         """
         network_def: dict[str, Any] = sly_data.get(AGENT_NETWORK_DEFINITION)

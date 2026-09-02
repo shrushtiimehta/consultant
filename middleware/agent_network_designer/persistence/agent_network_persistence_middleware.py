@@ -110,11 +110,11 @@ class AgentNetworkPersistenceMiddleware(AgentMiddleware):
 
                 Keys expected for this implementation are:
                     "agent_network_definition": an outline of an agent network
-        :param persist_only_when_modified: When True, skip validation and persistence entirely
-                for a turn that made no agent_network_changes (e.g. a clarifying question).
-        :param preserve_source_hocon: When True, persist by patching only the changed
-                instructions/description fields into the existing source HOCON file
-                (via SourcePreservingHoconEditor) instead of reassembling the whole network.
+        :param persist_only_when_modified: If True, skip validation and persistence entirely
+                when AGENT_NETWORK_CHANGES is empty -- nothing to write, so nothing to check.
+        :param preserve_source_hocon: If True, persist by patching only the changed
+                instructions/description fields into the exact source HOCON (see
+                _persist_source_changes) instead of reassembling the whole file.
         """
         self.logger: AndLogger = AndLogger(getLogger(self.__class__.__name__))
         self.reservationist = reservationist
@@ -144,6 +144,8 @@ class AgentNetworkPersistenceMiddleware(AgentMiddleware):
     # https://reference.langchain.com/python/langchain/agents/middleware/types/hook_config for details on
     # hook_config and jump_to.
     @hook_config(can_jump_to=["model"])
+    # Validation, retry, and the two persistence policies intentionally converge in this lifecycle hook.
+    # pylint: disable=too-many-branches
     async def aafter_agent(self, state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
         """
         Validate and persist the agent network after the agent finishes.
@@ -194,14 +196,11 @@ class AgentNetworkPersistenceMiddleware(AgentMiddleware):
                     self.max_validation_attempts,
                 )
                 message_parts: list[str] = []
-                instructions_tool = (
-                    "write_all_instructions" if self.preserve_source_hocon else "agent_network_instructions_editor"
-                )
                 if structure_errors:
                     if self.preserve_source_hocon:
                         message_parts.append(
-                            f"The agent network definition has structural issues: {structure_errors}. Do not "
-                            "rewrite the source automatically; report `STRUCTURAL_CHANGE_REQUIRED` with the reason."
+                            f"The agent network definition has structural issues: {structure_errors}. Do not rewrite "
+                            "the source automatically; report `STRUCTURAL_CHANGE_REQUIRED` with the reason."
                         )
                     else:
                         message_parts.append(
@@ -209,6 +208,9 @@ class AgentNetworkPersistenceMiddleware(AgentMiddleware):
                             "Call `agent_network_editor` to fix these structural problems."
                         )
                 if instructions_errors:
+                    instructions_tool = (
+                        "write_all_instructions" if self.preserve_source_hocon else "agent_network_instructions_editor"
+                    )
                     message_parts.append(
                         f"The agent network definition has instructions-related issues: {instructions_errors}. "
                         f"Call `{instructions_tool}` to fix these instructions problems."
@@ -216,13 +218,13 @@ class AgentNetworkPersistenceMiddleware(AgentMiddleware):
                 if structure_errors and instructions_errors:
                     if self.preserve_source_hocon:
                         message_parts.append(
-                            "Do not persist a partial repair while structural issues remain; report the "
-                            "structural handoff instead."
+                            "Do not persist a partial repair while structural issues remain; report the structural "
+                            "handoff instead."
                         )
                     else:
                         message_parts.append(
                             "Fix the structural issues first by calling `agent_network_editor`, "
-                            f"then address the instructions issues with `{instructions_tool}`."
+                            "then address the instructions issues with `agent_network_instructions_editor`."
                         )
                 return self._error_response(" ".join(message_parts))
 

@@ -15,12 +15,14 @@
 # END COPYRIGHT
 
 import logging
+from copy import deepcopy
 from typing import Any
 
 from neuro_san.interfaces.coded_tool import CodedTool
 
 from coded_tools.agent_network_editor.and_logger import AndLogger
 from coded_tools.agent_network_editor.constants import AGENT_NETWORK_DEFINITION
+from coded_tools.agent_network_editor.constants import AGENT_NETWORK_PENDING_CHANGES
 from coded_tools.agent_network_editor.progress_handler import ProgressHandler
 
 
@@ -85,12 +87,12 @@ class SetAgentInstructions(CodedTool):
         logger = AndLogger(logging.getLogger(self.__class__.__name__))
         logger.info(">>>>>>>>>>>>>>>>>>>Set Agent Instructions>>>>>>>>>>>>>>>>>>")
         logger.info("Agent Name: %s", the_agent_name)
-        logger.info("Instructions: %s", new_instructions)
-        network_def[the_agent_name]["instructions"] = new_instructions
-        logger.info("The resulting agent network: \n %s", str(network_def))
-        sly_data[AGENT_NETWORK_DEFINITION] = network_def
+        proposed_network = deepcopy(network_def)
+        proposed_network[the_agent_name]["instructions"] = new_instructions
+        await ProgressHandler.report_progress(args, proposed_network)
 
-        await ProgressHandler.report_progress(args, sly_data, network_def)
+        pending: dict[str, dict[str, str]] = sly_data.setdefault(AGENT_NETWORK_PENDING_CHANGES, {})
+        pending.setdefault(the_agent_name, {})["instructions"] = new_instructions
 
         logger.debug(">>>>>>>>>>>>>>>>>>> DONE %s !!!>>>>>>>>>>>>>>>>>>", self.__class__.__name__)
-        return f"The instructions for '{the_agent_name}' have been set in 'agent_network_definition' successfully."
+        return f"The instructions for '{the_agent_name}' have been staged successfully."

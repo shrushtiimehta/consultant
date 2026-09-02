@@ -31,11 +31,18 @@ AGENT_NETWORK_NAME: str = "agent_network_name"
 # persistence to avoid rebuilding an entire HOCON file for a surgical edit.
 AGENT_NETWORK_CHANGES: str = "agent_network_changes"
 
+# Proposed instruction/description values produced by worker agents. These are
+# committed to AGENT_NETWORK_DEFINITION only after the whole batch succeeds.
+AGENT_NETWORK_PENDING_CHANGES: str = "agent_network_pending_changes"
+
 # Exact source file used to load an existing network. Unlike AGENT_NETWORK_NAME,
 # this retains its directory so an editor can write back to the same file.
 AGENT_NETWORK_SOURCE_FILE: str = "agent_network_source_file"
 
 # Read-only, redacted view of the complete loaded HOCON used for diagnosis.
+# Unlike AGENT_NETWORK_DEFINITION (instructions/description/tools only), this keeps
+# llm_config, class, toolbox, max_iterations and the rest, so a consultant diagnosing
+# a failure can see the fields that actually caused it.
 AGENT_NETWORK_DIAGNOSTIC_CONTEXT: str = "agent_network_diagnostic_context"
 
 # Cached ProgressHandler instance controls AGENT_PROGRESS reporting throttling
