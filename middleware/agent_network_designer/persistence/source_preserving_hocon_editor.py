@@ -98,18 +98,24 @@ class SourcePreservingHoconEditor:
         # new_value to have included it. Doesn't apply to ${expertise_scoping_instructions},
         # which is deliberately only on entry-point agents, so it can't be forced onto every
         # agent the same way -- leave that one to whoever authored new_value.
+        # The trailing substitutions are a concatenation run, not a single token: an entry-point
+        # agent reads `""" ${expertise_scoping_instructions} ${aaosa_instructions},`. Scan the
+        # whole run, or a network with expertise scoping first gets a SECOND
+        # ${aaosa_instructions} appended on every edit. Append past the run too, so the added
+        # token lands last and matches the order every registry already uses.
         trailing_addition = ""
+        insert_at = token.end
         if field_name == "instructions":
-            next_index = value_index + 1
-            has_trailing_aaosa = (
-                next_index < object_end
-                and tokens[next_index].kind == "substitution"
-                and tokens[next_index].value == "${aaosa_instructions}"
-            )
+            has_trailing_aaosa = False
+            index = value_index + 1
+            while index < object_end and tokens[index].kind == "substitution":
+                has_trailing_aaosa = has_trailing_aaosa or tokens[index].value == "${aaosa_instructions}"
+                insert_at = tokens[index].end
+                index += 1
             if not has_trailing_aaosa:
                 trailing_addition = " ${aaosa_instructions}"
 
-        return text[: token.start] + replacement + trailing_addition + text[token.end :]
+        return text[: token.start] + replacement + text[token.end : insert_at] + trailing_addition + text[insert_at:]
 
     @staticmethod
     def _format_string_value(value: str) -> str:

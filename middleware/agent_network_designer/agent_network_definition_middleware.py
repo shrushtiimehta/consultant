@@ -610,12 +610,23 @@ class AgentNetworkDefinitionMiddleware(AgentMiddleware):
             "tools",
         }
         context = {key: deepcopy(value) for key, value in config.items() if key not in omitted_root_keys}
+        # Omitting aaosa_call at the root is not enough: every agent declares
+        # `"function": ${aaosa_call}{...}`, so the resolved function carries the expanded
+        # parameter schema -- including the 'Determine'/'Fulfill'/'Follow up' mode description.
+        # An editor reading that copies the protocol vocabulary into the instructions it writes.
+        # Compared against the real definition rather than matched by name, so an agent with its
+        # own parameters keeps them.
+        aaosa_parameters = (config.get("aaosa_call") or {}).get("parameters")
         diagnostic_agents = []
         for raw_agent in config.get("tools", []):
             if not isinstance(raw_agent, dict):
                 diagnostic_agents.append(deepcopy(raw_agent))
                 continue
             agent = deepcopy(raw_agent)
+            function = agent.get("function")
+            if isinstance(function, dict) and aaosa_parameters is not None:
+                if function.get("parameters") == aaosa_parameters:
+                    function.pop("parameters")
             agent_name = agent.get("name")
             # Use the boilerplate-stripped instructions, so the diagnostic view does not
             # re-introduce the aaosa/expertise text _extract_custom_instructions just removed.
