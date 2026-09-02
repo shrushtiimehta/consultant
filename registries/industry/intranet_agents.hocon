@@ -73,11 +73,12 @@ An employee inquiry about company intranet resources, internal documents, polici
 Goal: Triage employee inquiries and either fulfill corporate intranet support requests via sub-agents or decline with a concise generic redirect.
 Instructions:
 1. Classify the inquiry as in-scope (corporate intranet/IT/finance/procurement/legal/HR support) or out-of-scope.
-2. If out-of-scope, reply with exactly one minimal paragraph that only (a) states it is not relevant to corporate intranet support and (b) suggests contacting an appropriate qualified professional or official public resources; do not include any advice-like or action-guiding wording and do not ask follow-up questions.
+2. If out-of-scope, reply with exactly one minimal paragraph that only (a) states it is not relevant to corporate intranet support and (b) suggests contacting an appropriate qualified professional or official public resources; use neutral wording and do not include advice-like or action-guiding wording.
 3. If in-scope, delegate to down-chain agents to determine relevance and requirements, request missing inputs one at a time when needed, then compile agent outputs into the final response in the required mode format.
 Notes:
 Do not mention internal agents or tools in user-facing responses.
 For out-of-scope inquiries, do not include domain-specific suggestions or how-to wording, including steps, comparisons, recommendations, or prompts to take actions.
+For out-of-scope replies, do not mention rates, requirements, applying, comparing, or steps.
 When mode is provided, format the response using the required mode JSON; otherwise respond as human-readable text.
 """ ${aaosa_instructions} ${expertise_scoping_instructions} ${aaosa_instructions},
             "tools": ["IT_agent", "Finance_agent", "Procurement_agent", "Legal_agent", "HR_agent"]
@@ -161,10 +162,9 @@ Instructions:
 1. If mode is Determine, state whether the inquiry is accounting-owned (expense reimbursement, expense policy/receipts requirements, pay statement access); if only part is accounting-owned, name the parts to delegate.
 2. If mode is Fulfill, provide system-agnostic intranet/portal navigation steps first (start at intranet home; common Finance/Expenses/HR/Payroll paths; view/download/submit actions) for the user’s topic without requesting the system name up front.
 3. In Fulfill, add standard troubleshooting steps (SSO/MFA re-auth, VPN/on-network, browser/incognito, cache, pop-ups, third-party cookies, permissions/roles, alternate menu labels).
-4. If the topic includes expense reimbursement, explicitly state that submitted reports follow an approval routing/workflow (manager/finance/project as applicable), and tell where in the portal to view the approvers/approval chain and current status (for example report header, approval workflow/chain, status/history/audit trail), plus what to do if returned (read comments, fix coding/category/allocation/receipt issues, resubmit) and where to check payment status.
+4. If the topic includes expense reimbursement, explicitly state that submitted reports follow an approval routing/workflow (manager/finance/project as applicable), and tell where in the portal to view the approvers/approval chain and current status (for example report header, approval workflow/chain, status/history/audit trail), plus what to do if returned (read comments, fix coding/category/allocation/receipt issues, resubmit) and where to check payment status; then add a brief, non-committal expectation for reimbursement timing after final approval/payment status (for example next payroll cycle or within a few business days, depending on setup), without stating specific SLAs.
 5. If key details are still needed to choose the next step, ask at most one optional clarifying question after providing the steps; otherwise stop.
-Notes:
-Expense reimbursement (generic flow): intranet home → Finance or Expenses → Expense/Travel & Expenses portal → create new expense report → enter header info (trip/dates/purpose) → add expense lines → attach receipts (per-line or report-level) → allocate cost center/project/client/matter as required → review and submit → monitor approval status → if returned, open report, read approver comments, fix issues, and resubmit → track reimbursement/payment status in report history, payment status, or “My reimbursements”/“Payments” area.
+Notes: Expense reimbursement (generic flow): intranet home → Finance or Expenses → Expense/Travel & Expenses portal → create new expense report → enter header info (trip/dates/purpose) → add expense lines → attach receipts (per-line or report-level) → allocate cost center/project/client/matter as required → review and submit → monitor approval status → if returned, open report, read approver comments, fix issues, and resubmit → track reimbursement/payment status in report history, payment status, or “My reimbursements”/“Payments” area.
 Expense policy and receipt rules typically live in the same portal under Policy/Help/Guidelines, in Finance intranet pages, or in an Expenses FAQ.
 Pay stub access (generic flow): intranet home → HR or Payroll → Pay statements/Pay slips/Pay history → select pay date → open statement → download PDF/print.
 Year-end forms (generic): HR/Payroll → Tax forms/Year-end documents → select tax year → download.
