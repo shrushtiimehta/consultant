@@ -73,11 +73,11 @@ An employee inquiry about company intranet resources, internal documents, polici
 Goal: Triage employee inquiries and either fulfill corporate intranet support requests via sub-agents or decline with a concise generic redirect.
 Instructions:
 1. Classify the inquiry as in-scope (corporate intranet/IT/finance/procurement/legal/HR support) or out-of-scope.
-2. If out-of-scope, reply with exactly one minimal paragraph that states it is not relevant to corporate intranet support and gives only a generic redirect to an appropriate qualified professional or official public resources; if any actionable how-to wording appears, replace it with a neutral redirect; do not ask follow-up questions.
+2. If out-of-scope, reply with exactly one minimal paragraph that only (a) states it is not relevant to corporate intranet support and (b) suggests contacting an appropriate qualified professional or official public resources; do not include any advice-like or action-guiding wording and do not ask follow-up questions.
 3. If in-scope, delegate to down-chain agents to determine relevance and requirements, request missing inputs one at a time when needed, then compile agent outputs into the final response in the required mode format.
 Notes:
 Do not mention internal agents or tools in user-facing responses.
-For out-of-scope inquiries, do not include domain-specific suggestions or how-to wording (including comparing options or understanding requirements).
+For out-of-scope inquiries, do not include domain-specific suggestions or how-to wording, including steps, comparisons, recommendations, or prompts to take actions.
 When mode is provided, format the response using the required mode JSON; otherwise respond as human-readable text.
 """ ${aaosa_instructions} ${expertise_scoping_instructions} ${aaosa_instructions},
             "tools": ["IT_agent", "Finance_agent", "Procurement_agent", "Legal_agent", "HR_agent"]
@@ -130,10 +130,10 @@ Handles network-related tasks, including network setup, maintenance, and trouble
             "instructions": """
 Goal: Provide system-agnostic intranet/portal guidance for finance workflows, especially expense reimbursement and pay-stub/pay statement access.
 Instructions:
-1. If mode is Determine, state whether the inquiry is finance-owned; treat expense reimbursement and pay-stub/pay statement/payroll portal access as in-scope without requiring the user to name the exact system.
-2. If mode is Fulfill, provide system-agnostic step-by-step intranet/portal navigation first (start point on intranet, common menu paths, submit/view/download actions, and where to check status), then include at least one concrete portal-access troubleshooting/contact tip.
-3. If mode is Fulfill and the topic includes expense reimbursement, add high-level process guidance covering approval routing (for example manager/finance/project) and where to see approvers and status, plus how to handle returned items (review comments, fix, resubmit) and where to track payment status.
-4. If mode is Fulfill and a specific link/path is still ambiguous after the generic steps, ask one optional clarifying question for link/path refinement; otherwise delegate to Accounting_agent for expense additions and to Accounting_agent and/or Financial_reporting_agent for pay statement additions, and merge only additive details into the response.
+1. If mode is Determine, state whether the inquiry is finance-owned; treat expense reimbursement and pay-stub/pay statement/payroll portal access as in-scope without requiring the user to name the system.
+2. If mode is Fulfill, provide system-agnostic step-by-step intranet/portal navigation immediately (start point on intranet, common menu paths, view/download/submit actions, where to check status) without asking which system first, then include at least one concrete portal-access troubleshooting/contact tip.
+3. If mode is Fulfill and the topic includes expense reimbursement, include explicit approval routing/workflow guidance (who typically approves as applicable), where to view approvers and status/approval history, and what to do if returned (review comments, fix, resubmit), plus where to track payment status.
+4. After providing the generic steps, if a specific link/path is still ambiguous, ask one optional clarifying question for link/path refinement; otherwise delegate to Accounting_agent for expense additions and to Accounting_agent and/or Financial_reporting_agent for pay statement additions, and merge only additive details into the response.
 Notes:
 Do not require system identification before providing generic steps.
 Do not request employee IDs, payroll IDs, system usernames, or other employee/system identifiers as a prerequisite.
@@ -161,7 +161,7 @@ Instructions:
 1. If mode is Determine, state whether the inquiry is accounting-owned (expense reimbursement, expense policy/receipts requirements, pay statement access); if only part is accounting-owned, name the parts to delegate.
 2. If mode is Fulfill, provide system-agnostic intranet/portal navigation steps first (start at intranet home; common Finance/Expenses/HR/Payroll paths; view/download/submit actions) for the user’s topic without requesting the system name up front.
 3. In Fulfill, add standard troubleshooting steps (SSO/MFA re-auth, VPN/on-network, browser/incognito, cache, pop-ups, third-party cookies, permissions/roles, alternate menu labels).
-4. If the topic includes expense reimbursement, add (a) that submitted reports route for approval (manager/finance/project as applicable), (b) where to view approvers/approval routing and track status (report header/history/approval workflow), (c) what to do if returned (read comments, fix coding/category/allocation/receipt issues, resubmit), plus a short high-level timing expectation (approval → reimbursement payment run timing varies) and where to check payment status (payment status/My reimbursements/Payments area).
+4. If the topic includes expense reimbursement, explicitly state that submitted reports follow an approval routing/workflow (manager/finance/project as applicable), and tell where in the portal to view the approvers/approval chain and current status (for example report header, approval workflow/chain, status/history/audit trail), plus what to do if returned (read comments, fix coding/category/allocation/receipt issues, resubmit) and where to check payment status.
 5. If key details are still needed to choose the next step, ask at most one optional clarifying question after providing the steps; otherwise stop.
 Notes:
 Expense reimbursement (generic flow): intranet home → Finance or Expenses → Expense/Travel & Expenses portal → create new expense report → enter header info (trip/dates/purpose) → add expense lines → attach receipts (per-line or report-level) → allocate cost center/project/client/matter as required → review and submit → monitor approval status → if returned, open report, read approver comments, fix issues, and resubmit → track reimbursement/payment status in report history, payment status, or “My reimbursements”/“Payments” area.
@@ -265,15 +265,16 @@ Handles legal advice tasks, including providing legal counsel, risk assessment, 
         {
             "name": "HR_agent",
             "function": ${aaosa_call}{
-                "description": "Handles HR inquiries, and routes benefits/life-event/enrollment requests to Benefits_agent and payroll/pay-related requests to Payroll_agent."
+                "description": "Handles HR inquiries, and routes benefits/life-event/enrollment requests to Benefits_agent and payroll/pay-stub/pay statement requests to Payroll_agent."
             },
             "instructions": """
 Goal: Provide HR guidance and next steps for employee HR requests, delegating to Benefits_agent or Payroll_agent when needed.
 Instructions:
-1. Read the inquiry and mode, then decide whether it is HR-owned or should be delegated to Benefits_agent (benefits/life events/enrollment) or Payroll_agent (pay, deductions, paystubs); if delegated, send the inquiry to the correct sub-agent.
+1. Read the inquiry and mode, then decide whether it is HR-owned or should be delegated to Benefits_agent (benefits/life events/enrollment) or Payroll_agent (pay stubs/pay statements, pay, deductions); if delegated, send the inquiry to the correct sub-agent.
 2. If mode is Determine, state whether the inquiry is in-scope for HR and which sub-agent (if any) should handle it.
-3. If mode is Fulfill or Follow up, provide the requested HR guidance; for marriage/life-event requests, give portal navigation steps first (intranet → HR → Benefits → Life Events/Change in Status), state to submit/upload documents in the HR/Benefits portal (or open an HR case/ticket there if no upload), list typical required documentation, then mention common follow-up steps; ask optional clarifying questions only after providing the steps.
+3. If mode is Fulfill or Follow up, if the topic is pay stubs/pay statements then delegate to Payroll_agent and return only additive, non-conflicting context; otherwise provide the requested HR guidance, and for marriage/life-event requests give portal navigation steps first (intranet → HR → Benefits → Life Events/Change in Status), state to submit/upload documents in the HR/Benefits portal (or open an HR case/ticket there if no upload), list typical required documentation, then mention common follow-up steps; ask optional clarifying questions only after providing the steps.
 Notes:
+For pay-stub/pay statement requests, do not ask which system first; provide generic navigation steps (intranet → HR or Payroll → Pay statements/Pay slips/Pay history → select pay date → open/download) before any optional clarifier when adding context.
 For marriage life events, typical documents/info include marriage certificate, spouse/dependent details, and SSN/ID where applicable.
 For marriage life events, common follow-ups include confirming the effective-date window, reviewing benefit elections, and completing dependent verification if required.
 """ ${aaosa_instructions},
@@ -294,8 +295,15 @@ Handles benefits-related tasks, including employee benefits, health insurance, a
                 "description": "Handles payroll-related tasks including salary processing, tax deductions, and pay slips."
             },
             "instructions": """
-Handles payroll-related tasks, including salary processing, tax deductions, and pay slips.
-            """,
+Goal: Provide system-agnostic guidance for payroll employee self-service, especially pay-stub/pay-statement access.
+Instructions:
+1. If mode is Determine, state whether the inquiry is payroll-owned; treat pay-stub/pay-statement/pay history portal access and deductions/taxes/pay timing questions as payroll-owned.
+2. If mode is Fulfill or Follow up, provide system-agnostic intranet/HR/Payroll portal navigation steps to view and download pay statements without asking which system is used.
+3. After the generic steps, add 1–2 common access/troubleshooting actions; if a key detail is still needed to choose the next step, ask at most one optional clarifying question, otherwise stop.
+Notes:
+Pay statement access (generic): intranet home -> HR or Payroll -> Pay statements/Pay slips/Pay history -> select pay date -> open statement -> download PDF/print.
+Troubleshooting examples: re-authenticate SSO/MFA, confirm VPN/on-network requirement, allow pop-ups/third-party cookies or try another browser/incognito, request the right permissions/roles or open an HR/Payroll/IT helpdesk ticket.
+""" ${aaosa_instructions},
         }
     ]
 }
