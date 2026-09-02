@@ -33,14 +33,10 @@ This repo *is* the studio, so there is nothing to clone alongside it. Installing
 git clone https://github.com/shrushtiimehta/consultant.git
 cd consultant
 
-uv sync
-source .venv/bin/activate      # required -- `ns` and the runner live in the venv
-# or, without uv:
-#   python -m venv .venv && source .venv/bin/activate && pip install -e .
+make install
+source venv/bin/activate
+pip install neuro-san-studio
 ```
-
-Activate the venv in **every** shell you use this from, or prefix commands with `uv run`
-(`uv run ns run`). Without it you get `zsh: command not found: ns`.
 
 ### 2. The forked `nsflow` (required)
 
@@ -48,26 +44,12 @@ Step 1 installed `nsflow` from PyPI, but this project needs a patched version. C
 somewhere outside this repo and install editable, so it takes precedence:
 
 ```bash
-# adds the Network Consultant panel to the UI, answering NEEDS_CLARIFICATION questions
-# mid-run, and job logs mirrored into the LogsPanel.
 git clone -b network-consultant-compat https://github.com/shrushtiimehta/nsflow.git
-uv pip install -e ./nsflow
+pip install -e ./nsflow
 ```
 
 It is a fork of the `cognizant-ai-lab` original. Editable (`-e`) means edits in that checkout
-take effect here with no reinstall. Confirm it won:
-
-```bash
-python -c "import nsflow; print(nsflow.__file__)"
-# must point at your clone -- if it says site-packages, redo step 2
-```
-
-`neuro-san` stays as installed in step 1, straight from PyPI. There is a
-[`fix-ui-validation-error`](https://github.com/shrushtiimehta/neuro-san/tree/fix-ui-validation-error)
-fork carrying a HOCON pre-flight-validation change, but it is an in-flight branch against
-upstream `main`, **not** a dependency of this project — it sits ~920 commits behind the
-released `neuro-san` and installing it here would downgrade you far below what this project
-needs. Leave it alone unless you are working on that branch itself.
+take effect here with no reinstall. 
 
 ### 3. Credentials and local registries
 
@@ -75,9 +57,6 @@ needs. Leave it alone unless you are working on that branch itself.
 # API key(s) for whichever provider config/llm_config.hocon selects
 echo 'OPENAI_API_KEY=sk-...' >> .env
 echo 'ANTHROPIC_API_KEY=sk-ant-...' >> .env
-
-# the designer writes generated networks here; not tracked, so create it once
-mkdir -p registries/generated && echo '{}' > registries/generated/manifest.hocon
 ```
 
 ## Usage
@@ -91,8 +70,6 @@ consultant's questions as they come up.
 Start the server and the nsflow UI (`ns` comes from `neuro-san-studio`, inside the venv):
 
 ```bash
-source .venv/bin/activate      # or prefix the last line with `uv run`
-set -a; source .env; set +a
 ns run
 ```
 
@@ -118,8 +95,7 @@ Unattended runs. Note the CLI does **not** appear in the nsflow live view, even 
 A run that hits a NEEDS_CLARIFICATION question has no way to answer it here; use the UI for that.
 
 ```bash
-source .venv/bin/activate
-set -a; source .env; set +a
+source venv/bin/activate
 ```
 
 Build a brand-new network, generate tests, and iteratively fix it:
