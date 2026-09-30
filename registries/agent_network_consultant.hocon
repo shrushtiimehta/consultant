@@ -106,13 +106,13 @@ Given test failures and user directions, for each failing fixture:
             ],
             "middleware": [
                 {
-                    "class": "coded_tools.agent_network_consultant.definition_middleware.ConsultantDefinitionMiddleware",
+                    "class": "middleware.agent_network_consultant.definition_middleware.ConsultantDefinitionMiddleware",
                     "args": {
                         "sly_data": true
                     }
                 },
                 {
-                    "class": "coded_tools.agent_network_consultant.persistence_middleware.ConsultantPersistenceMiddleware",
+                    "class": "middleware.agent_network_consultant.persistence_middleware.ConsultantPersistenceMiddleware",
                     "args": {
                         "reservationist": true,
                         "sly_data": true,
@@ -200,7 +200,7 @@ Additional requirements:
             "tools": ["write_all_instructions", "read_thinking_trace", "network_scratchpad"],
             "middleware": [
                 {
-                    "class": "coded_tools.agent_network_consultant.definition_middleware.ConsultantDefinitionMiddleware",
+                    "class": "middleware.agent_network_consultant.definition_middleware.ConsultantDefinitionMiddleware",
                     "args": {"sly_data": true}
                 }
             ]
@@ -307,7 +307,7 @@ After the call:
             },
             "middleware": [
                 {
-                    "class": "coded_tools.agent_network_consultant.definition_middleware.ConsultantDefinitionMiddleware",
+                    "class": "middleware.agent_network_consultant.definition_middleware.ConsultantDefinitionMiddleware",
                     "args": {"sly_data": true}
                 }
             ]
@@ -545,7 +545,7 @@ OPTIONAL -- only set this when there is a directive targeting this specific agen
             },
             "middleware": [
                 {
-                    "class": "coded_tools.agent_network_consultant.definition_middleware.ConsultantDefinitionMiddleware",
+                    "class": "middleware.agent_network_consultant.definition_middleware.ConsultantDefinitionMiddleware",
                     "args": {
                         "sly_data": true
                     }
