@@ -14,12 +14,18 @@
 #
 # END COPYRIGHT
 
-"""Private sly-data keys used only by the Network Consultant."""
+"""Plateau and best-version state for a consultant run."""
+
+from dataclasses import dataclass
 
 
-class ConsultantState:  # pylint: disable=too-few-public-methods
-    """Own the consultant's private sly-data key names."""
+@dataclass
+class ConsultantScoreState:
+    """Keep full-suite and subset scoring histories independent."""
 
-    AGENT_NETWORK_CHANGES = "agent_network_changes"
-    AGENT_NETWORK_DIAGNOSTIC_CONTEXT = "agent_network_diagnostic_context"
-    AGENT_NETWORK_SOURCE_FILE = "agent_network_source_file"
+    best_score: tuple[int, int] | None = None
+    stale_rounds: int = 0
+    subset_best_score: tuple[int, int] | None = None
+    subset_stale_rounds: int = 0
+    best_hocon_text: str | None = None
+    best_hocon_iteration: int | None = None

@@ -106,13 +106,13 @@ Given test failures and user directions, for each failing fixture:
             ],
             "middleware": [
                 {
-                    "class": "middleware.agent_network_consultant.definition_middleware.ConsultantDefinitionMiddleware",
+                    "class": "middleware.agent_network_consultant.consultant_definition_middleware.ConsultantDefinitionMiddleware",
                     "args": {
                         "sly_data": true
                     }
                 },
                 {
-                    "class": "middleware.agent_network_consultant.persistence_middleware.ConsultantPersistenceMiddleware",
+                    "class": "middleware.agent_network_consultant.consultant_persistence_middleware.ConsultantPersistenceMiddleware",
                     "args": {
                         "reservationist": true,
                         "sly_data": true,
@@ -200,7 +200,7 @@ Additional requirements:
             "tools": ["write_all_instructions", "read_thinking_trace", "network_scratchpad"],
             "middleware": [
                 {
-                    "class": "middleware.agent_network_consultant.definition_middleware.ConsultantDefinitionMiddleware",
+                    "class": "middleware.agent_network_consultant.consultant_definition_middleware.ConsultantDefinitionMiddleware",
                     "args": {"sly_data": true}
                 }
             ]
@@ -307,7 +307,7 @@ After the call:
             },
             "middleware": [
                 {
-                    "class": "middleware.agent_network_consultant.definition_middleware.ConsultantDefinitionMiddleware",
+                    "class": "middleware.agent_network_consultant.consultant_definition_middleware.ConsultantDefinitionMiddleware",
                     "args": {"sly_data": true}
                 }
             ]
@@ -336,7 +336,7 @@ After the call:
 
         {
             "name": "read_job_log",
-            "class": "coded_tools.agent_network_consultant.read_thinking_trace.ReadJobLog",
+            "class": "coded_tools.agent_network_consultant.read_job_log.ReadJobLog",
             "function": {
                 "description": "Read the tail of the current job's own raw log -- round-level context (iteration progress, which fixtures passed/failed this round, any traceback) rather than one fixture's own trace.",
                 "parameters": {
@@ -378,7 +378,7 @@ After the call:
 
         {
             "name": "write_all_instructions",
-            "class": "coded_tools.agent_network_consultant.write_all_instructions.ConsultantWriteAllInstructions",
+            "class": "coded_tools.agent_network_consultant.consultant_write_all_instructions.ConsultantWriteAllInstructions",
             "function": {
                 "description": "Fan out writing of `instructions`/`description` for many agents in parallel. Call this ONCE per request with the full list of target agents.",
                 "parameters": {
@@ -545,7 +545,7 @@ OPTIONAL -- only set this when there is a directive targeting this specific agen
             },
             "middleware": [
                 {
-                    "class": "middleware.agent_network_consultant.definition_middleware.ConsultantDefinitionMiddleware",
+                    "class": "middleware.agent_network_consultant.consultant_definition_middleware.ConsultantDefinitionMiddleware",
                     "args": {
                         "sly_data": true
                     }

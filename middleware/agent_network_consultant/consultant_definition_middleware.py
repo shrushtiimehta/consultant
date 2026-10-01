@@ -30,7 +30,7 @@ from pyhocon.config_tree import ConfigValues
 from pyhocon.exceptions import ConfigException
 from pyparsing.exceptions import ParseException
 
-from coded_tools.agent_network_consultant.state import ConsultantState
+from coded_tools.agent_network_consultant.consultant_state import ConsultantState
 from coded_tools.agent_network_editor.sly_data_lock import SlyDataLock
 from middleware.agent_network_designer.agent_network_definition_middleware import AGENT_NETWORK_HOCON_FILE
 from middleware.agent_network_designer.agent_network_definition_middleware import AgentNetworkDefinitionMiddleware
@@ -40,12 +40,13 @@ class ConsultantDefinitionMiddleware(AgentNetworkDefinitionMiddleware):
     """Load the target network without changing the shared designer middleware."""
 
     async def _resolve_network_def(self) -> dict[str, Any] | list[dict[str, Any]] | None:
+        """Resolve the network and retain its source path for surgical persistence."""
         network_def = await super()._resolve_network_def()
         hocon_file = self.sly_data.get(AGENT_NETWORK_HOCON_FILE)
         if hocon_file and network_def:
             source_file = self._resolve_hocon_path(hocon_file)
             if source_file:
-                self.sly_data[ConsultantState.AGENT_NETWORK_SOURCE_FILE] = source_file
+                self.sly_data.update({ConsultantState.AGENT_NETWORK_SOURCE_FILE: source_file})
         return network_def
 
     def format_definition_prompt(self, network_def: dict[str, Any]) -> str:
@@ -55,14 +56,15 @@ class ConsultantDefinitionMiddleware(AgentNetworkDefinitionMiddleware):
         return f"## Current Agent Network Diagnostic Context\n\n```json\n{definition}\n```"
 
     async def _hocon_to_definition(self, network_hocon_file: str | None) -> dict[str, Any] | None:
+        """Load a definition while retaining unresolved source instruction literals."""
         config = await self._hocon_to_config(network_hocon_file)
         if config is None:
             return None
         network_def = await self._config_to_network_def(config, network_hocon_file)
         if network_def is not None:
             await self._apply_unresolved_instructions(network_def, network_hocon_file)
-            self.sly_data[ConsultantState.AGENT_NETWORK_DIAGNOSTIC_CONTEXT] = self._build_diagnostic_context(
-                config, network_def
+            self.sly_data.update(
+                {ConsultantState.AGENT_NETWORK_DIAGNOSTIC_CONTEXT: self._build_diagnostic_context(config, network_def)}
             )
         return network_def
 
@@ -94,14 +96,16 @@ class ConsultantDefinitionMiddleware(AgentNetworkDefinitionMiddleware):
             agent_name = agent.get("name", None)
             if not isinstance(agent_name, str) or agent_name not in network_def:
                 continue
-            if network_def[agent_name].get("instructions") is None:
+            network_agent = network_def.get(agent_name, {})
+            if network_agent.get("instructions") is None:
                 continue
             literal = self._literal_without_substitutions(agent.get("instructions", None))
             if literal:
-                network_def[agent_name]["instructions"] = await self._extract_custom_instructions(literal)
+                network_agent.update({"instructions": await self._extract_custom_instructions(literal)})
 
     @staticmethod
     def _literal_without_substitutions(value: Any) -> str | None:
+        """Return only literal text from a possibly substituted HOCON value."""
         if isinstance(value, str):
             return value
         if not isinstance(value, ConfigValues):
@@ -118,6 +122,7 @@ class ConsultantDefinitionMiddleware(AgentNetworkDefinitionMiddleware):
 
     @classmethod
     def _build_diagnostic_context(cls, config: dict[str, Any], network_def: dict[str, Any]) -> dict[str, Any]:
+        """Build the redacted full-network context shown to diagnosing agents."""
         omitted_root_keys = {
             "aaosa_call",
             "aaosa_command",
@@ -140,13 +145,14 @@ class ConsultantDefinitionMiddleware(AgentNetworkDefinitionMiddleware):
                 function.pop("parameters", None)
             agent_name = agent.get("name")
             if agent_name in network_def and "instructions" in agent:
-                agent["instructions"] = network_def[agent_name].get("instructions", "")
+                agent.update({"instructions": network_def.get(agent_name, {}).get("instructions", "")})
             diagnostic_agents.append(agent)
-        context["tools"] = diagnostic_agents
+        context.update({"tools": diagnostic_agents})
         return cls._redact_sensitive_values(context)
 
     @classmethod
     def _redact_sensitive_values(cls, value: Any, key_name: str = "") -> Any:
+        """Recursively redact secret-bearing keys and recognizable credential values."""
         if re.search(r"(?:api[_-]?key|authorization|credential|password|secret|token)", key_name, re.I):
             return "[REDACTED]"
         if isinstance(value, dict):
@@ -162,6 +168,7 @@ class ConsultantDefinitionMiddleware(AgentNetworkDefinitionMiddleware):
         return value
 
     async def _extract_custom_instructions(self, instructions: str) -> str:
+        """Remove shared boilerplate while retaining network-specific instructions."""
         legacy_prefix = r"You are part of a \w+ of assistants\.\s*"
         demo_mode = (
             "You are part of a demo system, so when queried, make up a realistic response as if "
@@ -177,6 +184,7 @@ class ConsultantDefinitionMiddleware(AgentNetworkDefinitionMiddleware):
         return " ".join(custom_part.split())
 
     async def _get_expertise_scoping_instructions(self) -> str:
+        """Load and cache the shared expertise-scoping boilerplate."""
         key = "expertise_scoping_instructions"
         async with await SlyDataLock.get_lock(self.sly_data, f"{key}_lock"):
             cached = self.sly_data.get(key)
@@ -188,5 +196,5 @@ class ConsultantDefinitionMiddleware(AgentNetworkDefinitionMiddleware):
             else:
                 config = ConfigFactory.parse_file(path)
                 value = config.get(key, "")
-            self.sly_data[key] = value
+            self.sly_data.update({key: value})
             return value

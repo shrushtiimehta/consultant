@@ -17,58 +17,97 @@
 """The per-fixture results file the UI reads pass/fail and failure reasons from."""
 
 import json
+import logging
+from pathlib import Path
+from unittest.mock import Mock
 
-from apps.network_consultant import test_runner
+import pytest
 
-
-def _job(monkeypatch, tmp_path):
-    monkeypatch.setattr(test_runner, "NSFLOW_JOB_ID", "job1")
-    monkeypatch.setattr(test_runner, "NSFLOW_JOB_DIR", str(tmp_path))
-    return tmp_path / "job1.results.json"
-
-
-def test_a_subset_round_keeps_the_verdicts_it_did_not_re_run(monkeypatch, tmp_path):
-    """The whole point of merging: the runner re-tests only what was failing, and a re-check
-    of one fixture says nothing about the others -- they must not vanish from the UI."""
-    path = _job(monkeypatch, tmp_path)
-    test_runner._write_fixture_results(
-        [
-            {"fixture": "a.hocon", "passed": True, "message": None, "infrastructure_error": False},
-            {"fixture": "b.hocon", "passed": False, "message": "'owners' not found", "infrastructure_error": False},
-        ]
-    )
-    test_runner._write_fixture_results(
-        [{"fixture": "b.hocon", "passed": True, "message": None, "infrastructure_error": False}]
-    )
-
-    recorded = json.loads(path.read_text(encoding="utf-8"))
-    assert set(recorded) == {"a.hocon", "b.hocon"}
-    assert recorded["a.hocon"]["passed"] is True
-    assert recorded["b.hocon"]["passed"] is True
-    assert recorded["b.hocon"]["message"] is None
+from apps.network_consultant import fixture_runner
+from apps.network_consultant.fixture_runner import FixtureRunner
 
 
-def test_failure_reason_and_infrastructure_flag_survive(monkeypatch, tmp_path):
-    path = _job(monkeypatch, tmp_path)
-    test_runner._write_fixture_results(
-        [{"fixture": "c.hocon", "passed": False, "message": "TIMEOUT_ISSUE: ...", "infrastructure_error": True}]
-    )
-    recorded = json.loads(path.read_text(encoding="utf-8"))["c.hocon"]
-    assert recorded == {"passed": False, "message": "TIMEOUT_ISSUE: ...", "infrastructure_error": True}
+class TestFixtureResults:
+    """Test fixture results."""
 
+    @staticmethod
+    def _job(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+        """Configure and return one temporary nsflow results file."""
+        monkeypatch.setattr(fixture_runner, "NSFLOW_JOB_ID", "job1")
+        monkeypatch.setattr(fixture_runner, "NSFLOW_JOB_DIR", str(tmp_path))
+        return tmp_path / "job1.results.json"
 
-def test_no_file_written_outside_an_nsflow_job(monkeypatch, tmp_path):
-    """Plain CLI use must not litter -- and has nowhere to write to anyway."""
-    monkeypatch.setattr(test_runner, "NSFLOW_JOB_ID", None)
-    monkeypatch.setattr(test_runner, "NSFLOW_JOB_DIR", str(tmp_path))
-    test_runner._write_fixture_results([{"fixture": "a.hocon", "passed": True}])
-    assert list(tmp_path.iterdir()) == []
+    @staticmethod
+    def test_a_subset_round_keeps_the_verdicts_it_did_not_re_run(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The whole point of merging: the runner re-tests only what was failing, and a re-check
+        of one fixture says nothing about the others -- they must not vanish from the UI."""
+        path = TestFixtureResults._job(monkeypatch, tmp_path)
+        FixtureRunner.write_fixture_results(
+            [
+                {"fixture": "a.hocon", "passed": True, "message": None, "infrastructure_error": False},
+                {
+                    "fixture": "b.hocon",
+                    "passed": False,
+                    "message": "'owners' not found",
+                    "infrastructure_error": False,
+                },
+            ]
+        )
+        FixtureRunner.write_fixture_results(
+            [{"fixture": "b.hocon", "passed": True, "message": None, "infrastructure_error": False}]
+        )
 
+        recorded = json.loads(path.read_text(encoding="utf-8"))
+        assert set(recorded) == {"a.hocon", "b.hocon"}
+        assert recorded.get("a.hocon", {}).get("passed") is True
+        assert recorded.get("b.hocon", {}).get("passed") is True
+        assert recorded.get("b.hocon", {}).get("message") is None
 
-def test_a_corrupt_file_does_not_fail_the_test_run(monkeypatch, tmp_path):
-    """The runner may be mid-write when something else reads it; losing old verdicts beats
-    raising out of a suite that has already finished running."""
-    path = _job(monkeypatch, tmp_path)
-    path.write_text("{not json", encoding="utf-8")
-    test_runner._write_fixture_results([{"fixture": "a.hocon", "passed": True}])
-    assert json.loads(path.read_text(encoding="utf-8"))["a.hocon"]["passed"] is True
+    @staticmethod
+    def test_failure_reason_and_infrastructure_flag_survive(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """Failure details survive serialization to the UI results file."""
+        path = TestFixtureResults._job(monkeypatch, tmp_path)
+        FixtureRunner.write_fixture_results(
+            [{"fixture": "c.hocon", "passed": False, "message": "TIMEOUT_ISSUE: ...", "infrastructure_error": True}]
+        )
+        recorded = json.loads(path.read_text(encoding="utf-8")).get("c.hocon")
+        assert recorded == {"passed": False, "message": "TIMEOUT_ISSUE: ...", "infrastructure_error": True}
+
+    @staticmethod
+    def test_no_file_written_outside_an_nsflow_job(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """Plain CLI use must not litter -- and has nowhere to write to anyway."""
+        monkeypatch.setattr(fixture_runner, "NSFLOW_JOB_ID", None)
+        monkeypatch.setattr(fixture_runner, "NSFLOW_JOB_DIR", str(tmp_path))
+        FixtureRunner.write_fixture_results([{"fixture": "a.hocon", "passed": True}])
+        assert not list(tmp_path.iterdir())
+
+    @staticmethod
+    def test_a_corrupt_file_does_not_fail_the_test_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """The runner may be mid-write when something else reads it; losing old verdicts beats
+        raising out of a suite that has already finished running."""
+        path = TestFixtureResults._job(monkeypatch, tmp_path)
+        path.write_text("{not json", encoding="utf-8")
+        FixtureRunner.write_fixture_results([{"fixture": "a.hocon", "passed": True}])
+        recorded = json.loads(path.read_text(encoding="utf-8")).get("a.hocon", {})
+        assert recorded.get("passed") is True
+
+    @staticmethod
+    def test_provider_api_key_error_is_an_infrastructure_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+        """Provider credential failures remain distinct from network behavior failures."""
+        driver = Mock()
+
+        def fail_with_api_key_error(_fixture_path: str) -> None:
+            """Emit the provider marker before the driver reports its resulting assertion."""
+            logging.getLogger("provider").error("API KEY error detected: invalid credential")
+            raise AssertionError("response did not satisfy the fixture")
+
+        driver.one_test.side_effect = fail_with_api_key_error
+        monkeypatch.setattr(FixtureRunner, "_create_driver", lambda _asserts, _fixture_name: driver)
+        monkeypatch.setattr(FixtureRunner, "_write_consolidated_thinking", lambda _fixture_name, _started: None)
+
+        result = FixtureRunner.run_fixture("tests/fixtures/example.hocon")
+
+        assert result.get("infrastructure_error") is True
+        assert "API KEY error detected: invalid credential" in result.get("message", "")

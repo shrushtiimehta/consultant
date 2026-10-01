@@ -70,6 +70,3 @@ class ConsultantScoring:
         return [
             line[len(prefix) :].strip() for line in (response or "").splitlines() if line.strip().startswith(prefix)
         ]
-
-
-extract_prefixed = ConsultantScoring.extract_prefixed

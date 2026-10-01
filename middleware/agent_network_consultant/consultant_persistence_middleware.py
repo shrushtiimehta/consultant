@@ -28,8 +28,7 @@ from neuro_san.internals.validation.network.structure_network_validator import S
 from neuro_san.internals.validation.network.toolbox_network_validator import ToolboxNetworkValidator
 from neuro_san.internals.validation.network.url_network_validator import UrlNetworkValidator
 
-from coded_tools.agent_network_consultant.source_preserving_hocon_editor import SourcePreservingHoconEditor
-from coded_tools.agent_network_consultant.state import ConsultantState
+from coded_tools.agent_network_consultant.consultant_state import ConsultantState
 from coded_tools.agent_network_editor.connectivity_dictionary_converter import ConnectivityDictionaryConverter
 from coded_tools.agent_network_editor.constants import AGENT_NETWORK_DEFINITION
 from coded_tools.agent_network_editor.constants import AGENT_NETWORK_HOCON_TEXT
@@ -38,6 +37,7 @@ from coded_tools.agent_network_editor.get_mcp_tool import GetMcpTool
 from coded_tools.agent_network_editor.get_subnetwork import GetSubnetwork
 from coded_tools.agent_network_editor.get_toolbox import GetToolbox
 from coded_tools.agent_network_query_generator.set_sample_queries import AGENT_NETWORK_QUERIES
+from middleware.agent_network_consultant.source_preserving_hocon_editor import SourcePreservingHoconEditor
 from middleware.agent_network_designer.persistence.agent_network_persistence_middleware import (
     AgentNetworkPersistenceMiddleware,
 )
@@ -56,12 +56,14 @@ class ConsultantPersistenceMiddleware(AgentNetworkPersistenceMiddleware):
         persist_only_when_modified: bool = False,
         preserve_source_hocon: bool = False,
     ) -> None:
+        """Configure consultant-only persistence behavior."""
         super().__init__(reservationist, sly_data)
         self.persist_only_when_modified = persist_only_when_modified
         self.preserve_source_hocon = preserve_source_hocon
 
     @hook_config(can_jump_to=["model"])
     async def aafter_agent(self, state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
+        """Validate and persist source changes after a consultant agent completes."""
         del state, runtime
         network_def: dict[str, Any] = self.sly_data.get(AGENT_NETWORK_DEFINITION)
         agent_network_name: str = self.sly_data.get(AGENT_NETWORK_NAME)
@@ -95,6 +97,7 @@ class ConsultantPersistenceMiddleware(AgentNetworkPersistenceMiddleware):
         return None
 
     def _validation_message(self, structure_errors: list[str], instructions_errors: list[str]) -> str:
+        """Build actionable feedback for network validation failures."""
         parts: list[str] = []
         if structure_errors:
             parts.append(
@@ -114,6 +117,7 @@ class ConsultantPersistenceMiddleware(AgentNetworkPersistenceMiddleware):
         return " ".join(parts)
 
     async def _validate_network(self, network_def: dict[str, Any]) -> tuple[list[str], list[str]]:
+        """Return structural and instruction validation failures separately."""
         subnetwork_names = await GetSubnetwork.get_subnetwork_names()
         mcp_servers = await GetMcpTool.get_mcp_servers()
         for url in GetMcpTool.sly_data_http_header_urls(self.sly_data):
@@ -142,6 +146,7 @@ class ConsultantPersistenceMiddleware(AgentNetworkPersistenceMiddleware):
         agent_network_name: str,
         sample_queries: list[str],
     ) -> str | None:
+        """Apply recorded fields to the original HOCON without rebuilding it."""
         del network_def, agent_network_name, sample_queries
         if not self.preserve_source_hocon:
             raise ValueError("Consultant persistence requires preserve_source_hocon=true.")
@@ -150,7 +155,11 @@ class ConsultantPersistenceMiddleware(AgentNetworkPersistenceMiddleware):
             raise ValueError("Cannot preserve source HOCON: no agent_network_source_file is available.")
         changes = self.sly_data.get(ConsultantState.AGENT_NETWORK_CHANGES, {})
         updated_text = await asyncio.to_thread(SourcePreservingHoconEditor.update_file, source_file, changes)
-        self.sly_data[AGENT_NETWORK_HOCON_TEXT] = updated_text
-        self.sly_data[ConsultantState.AGENT_NETWORK_CHANGES] = {}
+        self.sly_data.update(
+            {
+                AGENT_NETWORK_HOCON_TEXT: updated_text,
+                ConsultantState.AGENT_NETWORK_CHANGES: {},
+            }
+        )
         self.logger.info("Persisted surgical agent-network changes to %s", source_file)
         return None

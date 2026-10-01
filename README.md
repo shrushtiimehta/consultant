@@ -341,6 +341,32 @@ center of the screen. It opens a new window from which you can chat with the age
 5. If you want to make modifications, go back to the editor window and ask for changes.
 6. You can also edit any agent network by clicking the pen icon next to its name in the main window.
 
+### Agent Network Consultant
+
+The Agent Network Consultant tests an existing network and improves its agent instructions without changing its
+tools or topology. It uses generated ANTeGen fixtures as the behavioral contract, diagnoses failed criteria, applies
+instruction changes, and reruns the affected tests. Infrastructure failures, broken tools, and requests for facts the
+network cannot obtain are reported separately instead of being treated as instruction defects.
+
+In nsflow, select a network and open the **Self Improvement** tab. From there you can:
+
+* Generate test fixtures, optionally focused on a particular behavior.
+* View and run one fixture or the complete fixture suite.
+* Run the iterative improvement loop with a maximum iteration count and success ratio.
+* Review fixture verdicts, progress charts, clarification questions, tool issues, and ungrounded criteria.
+
+From a source checkout, the same workflow is available from the command line:
+
+```bash
+python -m apps.network_consultant.network_consultant \
+    --hocon-file basic/coffee_finder.hocon \
+    --direction "Preserve existing behavior while fixing failed tests"
+```
+
+Use `--max-iterations 0` to run tests without applying fixes, `--only-fixtures` to select fixture basenames, and
+`--git-versions` to push meaningful HOCON checkpoints to a dedicated branch on the configured Git remote. Run
+`python -m apps.network_consultant.network_consultant --help` for the complete option list.
+
 ### Import a project from a file / Export to a file
 
 You can import a project from a .hocon file or from a zip file using the `ns import <PATH>`.

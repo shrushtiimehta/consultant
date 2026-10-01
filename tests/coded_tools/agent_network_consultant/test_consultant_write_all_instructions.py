@@ -18,8 +18,8 @@
 
 import json
 
-from coded_tools.agent_network_consultant.state import ConsultantState
-from coded_tools.agent_network_consultant.write_all_instructions import ConsultantWriteAllInstructions
+from coded_tools.agent_network_consultant.consultant_state import ConsultantState
+from coded_tools.agent_network_consultant.consultant_write_all_instructions import ConsultantWriteAllInstructions
 from coded_tools.agent_network_editor.constants import AGENT_NETWORK_DEFINITION
 
 
@@ -39,9 +39,7 @@ class TestConsultantWriteAllInstructions:
         }
         response = json.dumps({"instructions": "Greet the user warmly."})
 
-        error = ConsultantWriteAllInstructions._apply_writer_response(  # pylint: disable=protected-access
-            "greeter", response, sly_data
-        )
+        error = ConsultantWriteAllInstructions.apply_writer_response("greeter", response, sly_data)
 
         assert error == ""
         assert sly_data.get(AGENT_NETWORK_DEFINITION).get("greeter") == {
@@ -58,9 +56,7 @@ class TestConsultantWriteAllInstructions:
         definition = {"greeter": {"instructions": "Say hello.", "description": "Greets users."}}
         sly_data = {AGENT_NETWORK_DEFINITION: definition}
 
-        error = ConsultantWriteAllInstructions._apply_writer_response(  # pylint: disable=protected-access
-            "greeter", "{}", sly_data
-        )
+        error = ConsultantWriteAllInstructions.apply_writer_response("greeter", "{}", sly_data)
 
         assert error == ""
         assert sly_data.get(AGENT_NETWORK_DEFINITION) == definition

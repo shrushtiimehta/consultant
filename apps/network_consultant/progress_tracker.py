@@ -18,14 +18,17 @@
 
 import json
 import os
+from dataclasses import dataclass
+from dataclasses import field
 from typing import Any
 from typing import Optional
 
-from apps.network_consultant.test_runner import NSFLOW_JOB_DIR
-from apps.network_consultant.test_runner import NSFLOW_JOB_ID
+from apps.network_consultant.fixture_runner import NSFLOW_JOB_DIR
+from apps.network_consultant.fixture_runner import NSFLOW_JOB_ID
 
 
-class _ProgressTracker:  # pylint: disable=too-few-public-methods
+@dataclass
+class ProgressTracker:
     """Persist chart-ready test checkpoints for an nsflow-launched run.
 
     The runner frequently re-tests only the fixtures that were failing.  The chart still needs
@@ -34,16 +37,19 @@ class _ProgressTracker:  # pylint: disable=too-few-public-methods
     A full-suite Before/After checkpoint resets that assumption with authoritative results.
     """
 
-    def __init__(self):
+    path: str | None = field(init=False)
+    check_number: int = 0
+    fixture_cohorts: dict[str, int] = field(default_factory=dict)
+    next_cohort: int = 1
+    last_entry: Optional[dict[str, Any]] = None
+
+    def __post_init__(self) -> None:
+        """Resolve optional nsflow output after constructing the tracker state."""
         self.path = (
             os.path.join(NSFLOW_JOB_DIR, f"{NSFLOW_JOB_ID}.progress.jsonl")
             if NSFLOW_JOB_ID and NSFLOW_JOB_DIR
             else None
         )
-        self.check_number = 0
-        self.fixture_cohorts: dict[str, int] = {}
-        self.next_cohort = 1
-        self.last_entry: Optional[dict[str, Any]] = None
 
     def record(
         self,
@@ -53,8 +59,8 @@ class _ProgressTracker:  # pylint: disable=too-few-public-methods
         improvement_iteration: Optional[int] = None,
     ) -> None:
         """Update cumulative state and, for nsflow jobs, append one complete checkpoint."""
-        passing = {result["fixture"] for result in results if result.get("passed")}
-        tested = {result["fixture"] for result in results}
+        passing = {result.get("fixture", "") for result in results if result.get("passed")}
+        tested = {result.get("fixture", "") for result in results}
 
         if checkpoint in {"generated", "before", "after"}:
             # These checkpoints always come from the complete suite and therefore replace every
@@ -67,7 +73,7 @@ class _ProgressTracker:  # pylint: disable=too-few-public-methods
             for fixture in tested:
                 if fixture in passing:
                     if fixture not in self.fixture_cohorts:
-                        self.fixture_cohorts[fixture] = cohort
+                        self.fixture_cohorts.update({fixture: cohort})
                 else:
                     self.fixture_cohorts.pop(fixture, None)
             self.next_cohort += 1

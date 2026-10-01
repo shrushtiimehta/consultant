@@ -21,8 +21,8 @@ import json
 import os
 import shutil
 
-from apps.network_consultant.test_runner import IMPROVEMENT_THINKING_DIR
-from apps.network_consultant.test_runner import fixture_paths
+from apps.network_consultant.fixture_runner import IMPROVEMENT_THINKING_DIR
+from apps.network_consultant.fixture_runner import FixtureRunner
 
 
 class GeneratedTestsCache:
@@ -38,11 +38,11 @@ class GeneratedTestsCache:
     @staticmethod
     def paths(network_name: str) -> tuple[str, str]:
         """(results_json_path, thinking_traces_dir) for this network's cached baseline, if any."""
-        os.makedirs(GENTESTS_CACHE_DIR, exist_ok=True)
+        os.makedirs(GeneratedTestsCache.GENTESTS_CACHE_DIR, exist_ok=True)
         safe_name = network_name.replace("/", "_")
         return (
-            os.path.join(GENTESTS_CACHE_DIR, f"{safe_name}.json"),
-            os.path.join(GENTESTS_CACHE_DIR, f"{safe_name}_thinking"),
+            os.path.join(GeneratedTestsCache.GENTESTS_CACHE_DIR, f"{safe_name}.json"),
+            os.path.join(GeneratedTestsCache.GENTESTS_CACHE_DIR, f"{safe_name}_thinking"),
         )
 
     @staticmethod
@@ -58,7 +58,7 @@ class GeneratedTestsCache:
         hasher = hashlib.sha256()
         with open(hocon_path, encoding="utf-8") as hocon_file:
             hasher.update(hocon_file.read().encode("utf-8"))
-        for path in fixture_paths(network_name):
+        for path in FixtureRunner.fixture_paths(network_name):
             hasher.update(path.encode("utf-8"))
             with open(path, encoding="utf-8") as fixture_file:
                 hasher.update(fixture_file.read().encode("utf-8"))
@@ -107,6 +107,3 @@ class GeneratedTestsCache:
             shutil.copytree(thinking_dir, IMPROVEMENT_THINKING_DIR, dirs_exist_ok=True)
         shutil.rmtree(thinking_dir, ignore_errors=True)
         return cached.get("results") if matches else None
-
-
-GENTESTS_CACHE_DIR = GeneratedTestsCache.GENTESTS_CACHE_DIR

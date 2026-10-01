@@ -23,8 +23,8 @@ import subprocess
 import tempfile
 from typing import Optional
 
-from apps.network_consultant.test_runner import NSFLOW_JOB_DIR
-from apps.network_consultant.test_runner import NSFLOW_JOB_ID
+from apps.network_consultant.fixture_runner import NSFLOW_JOB_DIR
+from apps.network_consultant.fixture_runner import NSFLOW_JOB_ID
 
 logger = logging.getLogger("network_consultant")
 
@@ -35,7 +35,7 @@ class GitVersioning:
     @staticmethod
     def write_git_branch(branch: str) -> None:
         """Persist which branch --git-versions is committing this run's snapshots to, so nsflow's UI
-        can surface it (mirrors _write_tool_issues) -- a no-op when not running as an nsflow job."""
+        can surface it (mirrors write_tool_issues) -- a no-op when not running as an nsflow job."""
         if not (NSFLOW_JOB_ID and NSFLOW_JOB_DIR):
             return
         branch_path = os.path.join(NSFLOW_JOB_DIR, f"{NSFLOW_JOB_ID}.git_branch.txt")

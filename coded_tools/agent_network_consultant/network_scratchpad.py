@@ -14,6 +14,9 @@
 #
 # END COPYRIGHT
 
+"""Per-network scratchpad used across Network Consultant repair rounds."""
+
+import asyncio
 import logging
 import re
 from pathlib import Path
@@ -31,27 +34,6 @@ from coded_tools.agent_network_editor.constants import AGENT_NETWORK_NAME
 SCRATCHPAD_DIR = Path("logs/network_consultant_scratchpad").resolve()
 
 
-def _safe_path(network_name: str) -> Path:
-    safe_name = re.sub(r"[^\w.\-]", "_", network_name)
-    path = (SCRATCHPAD_DIR / f"{safe_name}.txt").resolve()
-    path.relative_to(SCRATCHPAD_DIR)  # raises ValueError if network_name tried to escape the dir
-    return path
-
-
-def clear_for_hocon_file(hocon_file: str) -> None:
-    """
-    Delete this network's scratchpad, if any. Call once at the very start of a fresh
-    apps/network_consultant/run.py run so it never inherits notes left over from a previous,
-    unrelated run -- within one run's iteration loop, leave it alone so it persists across rounds.
-
-    :param hocon_file: Same value passed as "agent_network_hocon_file" in sly_data. Keyed the same
-        way AgentNetworkDefinitionMiddleware derives "agent_network_name" (Path(...).stem, i.e. the
-        bare filename with no directory or extension) so this clears the exact file
-        NetworkScratchpad.async_invoke would later read/write for this network.
-    """
-    _safe_path(Path(hocon_file).stem).unlink(missing_ok=True)
-
-
 class NetworkScratchpad(CodedTool):
     """
     CodedTool for a per-network, cross-round scratchpad. A sub-agent like network_behavior_fixer
@@ -63,6 +45,40 @@ class NetworkScratchpad(CodedTool):
     Reading consumes it -- the file is deleted as part of the read, so notes don't just pile up
     forever; write again after reading if there's still something worth remembering.
     """
+
+    @staticmethod
+    def _safe_path(network_name: str) -> Path:
+        """Return the network's path after constraining it to the scratchpad directory."""
+        safe_name = re.sub(r"[^\w.\-]", "_", network_name)
+        path = (SCRATCHPAD_DIR / f"{safe_name}.txt").resolve()
+        path.relative_to(SCRATCHPAD_DIR)
+        return path
+
+    @staticmethod
+    def clear_for_hocon_file(hocon_file: str) -> None:
+        """Delete the scratchpad belonging to a fresh consultant run."""
+        NetworkScratchpad._safe_path(Path(hocon_file).stem).unlink(missing_ok=True)
+
+    @staticmethod
+    def _write(path: Path, content: str, logger: AndLogger) -> Union[dict[str, Any], str]:
+        """Append one note to a network scratchpad."""
+        if not content:
+            return "Error: No 'content' provided to write."
+        SCRATCHPAD_DIR.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as scratch_file:
+            scratch_file.write(content.strip() + "\n")
+        logger.info("Wrote to scratchpad: %s", path)
+        return {"saved": True}
+
+    @staticmethod
+    def _read(path: Path, logger: AndLogger) -> dict[str, str]:
+        """Read and consume one network scratchpad."""
+        if not path.is_file():
+            return {"content": ""}
+        content = path.read_text(encoding="utf-8")
+        path.unlink()
+        logger.info("Read and cleared scratchpad: %s", path)
+        return {"content": content}
 
     async def async_invoke(self, args: dict[str, Any], sly_data: dict[str, Any]) -> Union[dict[str, Any], str]:
         """
@@ -89,24 +105,10 @@ class NetworkScratchpad(CodedTool):
             return "Error: 'action' must be 'read' or 'write'."
 
         try:
-            path = _safe_path(network_name)
+            path = self._safe_path(network_name)
         except ValueError:
             return "Error: network_name resolves outside the scratchpad directory."
 
         if action == "write":
-            content: str = args.get("content", "")
-            if not content:
-                return "Error: No 'content' provided to write."
-            SCRATCHPAD_DIR.mkdir(parents=True, exist_ok=True)
-            with path.open("a", encoding="utf-8") as scratch_file:
-                scratch_file.write(content.strip() + "\n")
-            logger.info("Wrote to scratchpad: %s", path)
-            return {"saved": True}
-
-        # action == "read": consume it.
-        if not path.is_file():
-            return {"content": ""}
-        content = path.read_text(encoding="utf-8")
-        path.unlink()
-        logger.info("Read and cleared scratchpad: %s", path)
-        return {"content": content}
+            return await asyncio.to_thread(self._write, path, args.get("content", ""), logger)
+        return await asyncio.to_thread(self._read, path, logger)

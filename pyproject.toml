@@ -62,7 +62,7 @@ ignore = []
 
 [tool.ruff.lint.isort]
 force-single-line = true
-known-first-party = ["apps", "coded_tools", "tests"]
+known-first-party = ["apps", "coded_tools", "middleware", "tests"]
 
 [tool.pylint]
 max-line-length = 119

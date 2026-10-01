@@ -19,7 +19,7 @@
 import pytest
 from pyhocon import ConfigFactory
 
-from coded_tools.agent_network_consultant.source_preserving_hocon_editor import SourcePreservingHoconEditor
+from middleware.agent_network_consultant.source_preserving_hocon_editor import SourcePreservingHoconEditor
 
 
 class TestSourcePreservingHoconEditor:

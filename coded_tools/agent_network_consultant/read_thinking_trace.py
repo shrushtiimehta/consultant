@@ -14,8 +14,10 @@
 #
 # END COPYRIGHT
 
+"""Coded tool for reading a fixture's saved agent-thinking trace."""
+
+import asyncio
 import logging
-import os
 import re
 from pathlib import Path
 from typing import Any
@@ -29,14 +31,6 @@ from coded_tools.agent_network_editor.and_logger import AndLogger
 # "--- <agent_origin> ---" section headers _write_consolidated_thinking writes.
 THINKING_DIR = Path("logs/thinking_dir/improvement").resolve()
 SECTION_HEADER = re.compile(r"^--- (.+) ---$", re.MULTILINE)
-
-# Set by nsflow's backend (network_consultant_endpoints.py's _start_job) on the current
-# process's environment when this whole session is running as one of its background jobs --
-# unset for plain CLI usage (`python -m apps.network_consultant.run` directly), in which
-# case there is no per-job log file to read at all.
-NSFLOW_JOB_ID = os.environ.get("NSFLOW_JOB_ID")
-NSFLOW_JOB_DIR = os.environ.get("NSFLOW_JOB_DIR")
-JOB_LOG_TAIL_LINES = 200
 
 
 class ReadThinkingTrace(CodedTool):
@@ -57,8 +51,13 @@ class ReadThinkingTrace(CodedTool):
         for index, header in enumerate(headers):
             start = header.end()
             end = headers[index + 1].start() if index + 1 < len(headers) else len(content)
-            sections[header.group(1)] = content[start:end].strip()
+            sections.update({header.group(1): content[start:end].strip()})
         return sections
+
+    @staticmethod
+    def _read_trace(path: Path) -> str | None:
+        """Read a trace when it exists, otherwise return no content."""
+        return path.read_text(encoding="utf-8") if path.is_file() else None
 
     async def async_invoke(self, args: dict[str, Any], sly_data: dict[str, Any]) -> Union[dict[str, Any], str]:
         """
@@ -75,6 +74,7 @@ class ReadThinkingTrace(CodedTool):
             With agent_name: {"agent_name": ..., "trace": ...} -- that agent's full trace.
             otherwise: A text string error message.
         """
+        del sly_data
         logger = AndLogger(logging.getLogger(self.__class__.__name__))
 
         fixture_name: str = args.get("fixture_name", "")
@@ -87,11 +87,11 @@ class ReadThinkingTrace(CodedTool):
             trace_path.relative_to(THINKING_DIR)
         except ValueError:
             return "Error: fixture_name resolves outside the thinking-trace directory."
-        if not trace_path.is_file():
+        content = await asyncio.to_thread(self._read_trace, trace_path)
+        if content is None:
             return f"Error: No saved thinking trace found for fixture '{fixture_name}'."
 
         logger.info("Reading thinking trace: %s", trace_path)
-        content = trace_path.read_text(encoding="utf-8")
         sections = self._parse_sections(content)
 
         agent_name: str = args.get("agent_name", "")
@@ -102,45 +102,4 @@ class ReadThinkingTrace(CodedTool):
                 f"Error: No trace for agent '{agent_name}' in fixture '{fixture_name}'. "
                 f"Available agents: {list(sections.keys())}"
             )
-        return {"agent_name": agent_name, "trace": sections[agent_name]}
-
-
-class ReadJobLog(CodedTool):
-    """
-    CodedTool that lets consultant read the tail of its own current nsflow job's raw
-    log -- round-level context (iteration progress, which fixtures passed/failed this round,
-    any traceback) rather than one fixture's own trace. The job is always the one this session
-    is currently running as. For per-fixture, per-agent traces instead, see ReadThinkingTrace --
-    the two are deliberately separate tools so this one only ever reaches sub-agents that need
-    it and vice versa.
-    """
-
-    async def async_invoke(self, args: dict[str, Any], sly_data: dict[str, Any]) -> Union[dict[str, Any], str]:
-        """
-        :param args: A dictionary with the following key:
-                "tail_lines": optional int; how many lines of log tail to return. Defaults to
-                    JOB_LOG_TAIL_LINES when omitted.
-
-        :param sly_data: Unused by this implementation.
-
-        :return:
-            {"job_log_tail": <the requested tail>} on success.
-            otherwise: A text string error message (not running as an nsflow job, or its log
-                file isn't available for some other reason).
-        """
-        logger = AndLogger(logging.getLogger(self.__class__.__name__))
-
-        if not (NSFLOW_JOB_ID and NSFLOW_JOB_DIR):
-            return "Error: Not running as an nsflow job -- there is no per-job log to read."
-
-        tail_lines = args.get("tail_lines") or JOB_LOG_TAIL_LINES
-
-        log_path = os.path.join(NSFLOW_JOB_DIR, f"{NSFLOW_JOB_ID}.log")
-        try:
-            with open(log_path, "r", encoding="utf-8", errors="replace") as log_file:
-                lines = log_file.readlines()[-tail_lines:]
-        except FileNotFoundError:
-            return f"Error: Job log not found: {log_path}"
-
-        logger.info("Reading job log: %s", log_path)
-        return {"job_log_tail": "".join(lines)}
+        return {"agent_name": agent_name, "trace": sections.get(agent_name, "")}

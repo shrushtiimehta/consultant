@@ -26,7 +26,7 @@ from pathlib import Path
 
 from pyhocon import ConfigFactory
 
-from coded_tools.agent_network_consultant.hocon_token import HoconToken
+from middleware.agent_network_consultant.hocon_token import HoconToken
 
 _AAOSA_INCLUDE = re.compile(r'include\s+"[^"]*aaosa[^"]*\.hocon"')
 _PATH_LOCKS: dict[Path, threading.Lock] = {}
@@ -64,6 +64,7 @@ class SourcePreservingHoconEditor:
 
     @classmethod
     def _replace_agent_field(cls, text: str, agent_name: str, field_name: str, new_value: str) -> str:
+        """Replace one editable field inside a named agent block."""
         tokens = cls._tokens(text)
         block_start, _ = cls._find_agent_block(tokens, agent_name)
         object_start = cls._token_index_at(tokens, block_start)
@@ -132,6 +133,7 @@ class SourcePreservingHoconEditor:
 
     @classmethod
     def _find_agent_block(cls, tokens: list[HoconToken], agent_name: str) -> tuple[int, int]:
+        """Return token indexes bounding the requested agent definition."""
         root_start = cls._first_token(tokens, "{")
         root_end = cls._matching_index(tokens, root_start, "{", "}")
         tools_index = cls._property_value_index(tokens, root_start, root_end, "tools")
@@ -166,6 +168,7 @@ class SourcePreservingHoconEditor:
 
     @staticmethod
     def _token_index_at(tokens: list[HoconToken], start: int) -> int:
+        """Return the index of the token beginning at a source offset."""
         for index, token in enumerate(tokens):
             if token.start == start:
                 return index
@@ -173,6 +176,7 @@ class SourcePreservingHoconEditor:
 
     @staticmethod
     def _first_token(tokens: list[HoconToken], value: str) -> int:
+        """Return the first token index carrying the requested value."""
         for index, token in enumerate(tokens):
             if token.value == value:
                 return index
@@ -180,12 +184,14 @@ class SourcePreservingHoconEditor:
 
     @staticmethod
     def _skip_substitutions(tokens: list[HoconToken], index: int, end: int) -> int:
+        """Advance beyond substitutions that precede a literal field value."""
         while index < end and tokens[index].kind == "substitution":
             index += 1
         return index
 
     @classmethod
     def _property_value_index(cls, tokens: list[HoconToken], start: int, end: int, key: str) -> int:
+        """Return the value-token index for a direct property in a bounded block."""
         depth = 0
         index = start + 1
         while index < end:
@@ -203,6 +209,7 @@ class SourcePreservingHoconEditor:
 
     @staticmethod
     def _matching_index(tokens: list[HoconToken], start: int, opening: str, closing: str) -> int:
+        """Return the closing token matching a nested opening token."""
         if tokens[start].value != opening:
             raise ValueError(f"Expected {opening!r} at HOCON token boundary.")
         depth = 0
@@ -217,6 +224,7 @@ class SourcePreservingHoconEditor:
 
     @classmethod
     def _ensure_execution_limits(cls, text: str) -> str:
+        """Add bounded execution defaults only when the source omits them."""
         tokens = cls._tokens(text)
         root_start = cls._first_token(tokens, "{")
         root_end = cls._matching_index(tokens, root_start, "{", "}")
@@ -236,72 +244,90 @@ class SourcePreservingHoconEditor:
         return text[:position] + insertion + text[position:]
 
     @staticmethod
-    # Keeping the scanner's state transitions together makes its source spans auditable.
-    # pylint: disable=too-many-branches,too-many-statements
     def _tokens(text: str) -> list[HoconToken]:
         """Lex significant HOCON tokens while ignoring whitespace and comments."""
         tokens: list[HoconToken] = []
         index = 0
-        punctuation = "{}[]:=,"
         while index < len(text):
-            if text[index].isspace():
-                index += 1
-                continue
-            if text[index] == "#" or text.startswith("//", index):
-                newline = text.find("\n", index)
-                index = len(text) if newline < 0 else newline + 1
+            ignored_end = SourcePreservingHoconEditor._ignored_end(text, index)
+            if ignored_end is not None:
+                index = ignored_end
                 continue
             if text.startswith('"""', index):
-                end = text.find('"""', index + 3)
-                if end < 0:
-                    raise ValueError("Unterminated triple-quoted HOCON string.")
-                tokens.append(HoconToken("string", text[index + 3 : end], index, end + 3))
-                index = end + 3
-                continue
-            if text[index] == '"':
-                end = index + 1
-                escaped = False
-                while end < len(text):
-                    if text[end] == '"' and not escaped:
-                        break
-                    escaped = text[end] == "\\" and not escaped
-                    if text[end] != "\\":
-                        escaped = False
-                    end += 1
-                if end >= len(text):
-                    raise ValueError("Unterminated quoted HOCON string.")
-                raw = text[index : end + 1]
-                try:
-                    value = json.loads(raw)
-                except json.JSONDecodeError as exc:
-                    raise ValueError("Invalid quoted HOCON string.") from exc
-                tokens.append(HoconToken("string", value, index, end + 1))
-                index = end + 1
-                continue
-            if text.startswith("${", index):
-                end = text.find("}", index + 2)
-                if end < 0:
-                    raise ValueError("Unterminated HOCON substitution.")
-                tokens.append(HoconToken("substitution", text[index : end + 1], index, end + 1))
-                index = end + 1
-                continue
-            if text[index] in punctuation:
-                tokens.append(HoconToken("punctuation", text[index], index, index + 1))
-                index += 1
-                continue
-            end = index
-            while end < len(text):
-                if text[end].isspace() or text[end] in punctuation or text[end] == "#" or text.startswith("//", end):
-                    break
-                end += 1
-            if end == index:
-                raise ValueError(f"Unexpected HOCON character at offset {index}.")
-            tokens.append(HoconToken("bare", text[index:end], index, end))
-            index = end
+                token = SourcePreservingHoconEditor._triple_quoted_token(text, index)
+            elif text[index] == '"':
+                token = SourcePreservingHoconEditor._quoted_token(text, index)
+            elif text.startswith("${", index):
+                token = SourcePreservingHoconEditor._substitution_token(text, index)
+            elif text[index] in "{}[]:=,":
+                token = HoconToken("punctuation", text[index], index, index + 1)
+            else:
+                token = SourcePreservingHoconEditor._bare_token(text, index)
+            tokens.append(token)
+            index = token.end
         return tokens
+
+    @staticmethod
+    def _ignored_end(text: str, index: int) -> int | None:
+        """Return the offset after whitespace or a comment, if one starts here."""
+        if text[index].isspace():
+            return index + 1
+        if text[index] == "#" or text.startswith("//", index):
+            newline = text.find("\n", index)
+            return len(text) if newline < 0 else newline + 1
+        return None
+
+    @staticmethod
+    def _triple_quoted_token(text: str, index: int) -> HoconToken:
+        """Read one triple-quoted HOCON string token."""
+        end = text.find('"""', index + 3)
+        if end < 0:
+            raise ValueError("Unterminated triple-quoted HOCON string.")
+        return HoconToken("string", text[index + 3 : end], index, end + 3)
+
+    @staticmethod
+    def _quoted_token(text: str, index: int) -> HoconToken:
+        """Read and decode one JSON-compatible quoted HOCON string token."""
+        end = index + 1
+        escaped = False
+        while end < len(text):
+            if text[end] == '"' and not escaped:
+                break
+            escaped = text[end] == "\\" and not escaped
+            if text[end] != "\\":
+                escaped = False
+            end += 1
+        if end >= len(text):
+            raise ValueError("Unterminated quoted HOCON string.")
+        try:
+            value = json.loads(text[index : end + 1])
+        except json.JSONDecodeError as exc:
+            raise ValueError("Invalid quoted HOCON string.") from exc
+        return HoconToken("string", value, index, end + 1)
+
+    @staticmethod
+    def _substitution_token(text: str, index: int) -> HoconToken:
+        """Read one HOCON substitution token."""
+        end = text.find("}", index + 2)
+        if end < 0:
+            raise ValueError("Unterminated HOCON substitution.")
+        return HoconToken("substitution", text[index : end + 1], index, end + 1)
+
+    @staticmethod
+    def _bare_token(text: str, index: int) -> HoconToken:
+        """Read one unquoted HOCON token."""
+        end = index
+        while end < len(text):
+            if text[end].isspace() or text[end] in "{}[]:=," or text[end] == "#" or text.startswith("//", end):
+                break
+            end += 1
+        if end == index:
+            raise ValueError(f"Unexpected HOCON character at offset {index}.")
+        return HoconToken("bare", text[index:end], index, end)
 
     @classmethod
     def _validate_and_atomic_write(cls, path: Path, content: str) -> None:
+        """Validate HOCON content and atomically replace its source file."""
         mode = stat.S_IMODE(path.stat().st_mode)
         temporary_name = ""
         try:

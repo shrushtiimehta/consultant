@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import time
+from typing import Any
 
 from neuro_san.client.agent_session_factory import AgentSessionFactory
 from neuro_san.client.streaming_input_processor import StreamingInputProcessor
@@ -33,7 +34,7 @@ class ConsultantSession:
     """Open and use one Network Consultant agent session."""
 
     @staticmethod
-    def open_session(agent_name: str, connection: str, host: str, port: int):
+    def open_session(agent_name: str, connection: str, host: str, port: int) -> tuple[Any, dict[str, Any]]:
         """Open a session against one of this studio's own networks -- "http" talks to a running
         `ns run` server (visible in nsflow); "direct" runs the network in this process instead."""
         logger.info("Opening session: agent=%s connection=%s host=%s port=%d", agent_name, connection, host, port)
@@ -86,17 +87,22 @@ class ConsultantSession:
         except ValueError:
             return response
         if isinstance(parsed, dict) and isinstance(parsed.get("error"), str):
-            return parsed["error"]
+            return parsed.get("error", response)
         return response
 
     @staticmethod
-    def chat(session, thread: dict, message: str, sly_data: dict = None) -> tuple:
+    def chat(
+        session: Any,
+        thread: dict[str, Any],
+        message: str,
+        sly_data: dict[str, Any] | None = None,
+    ) -> tuple[str, dict[str, Any]]:
         """Send one message on an existing thread; returns (response_text, updated_thread)."""
         if sly_data:
-            thread["sly_data"] = {**(thread.get("sly_data") or {}), **sly_data}
+            thread.update({"sly_data": {**(thread.get("sly_data") or {}), **sly_data}})
         os.makedirs(THINKING_DIR, exist_ok=True)
         processor = StreamingInputProcessor("DEFAULT", THINKING_FILE, session, THINKING_DIR)
-        thread["user_input"] = message
+        thread.update({"user_input": message})
         logger.info("chat -> sending message (%d chars)", len(message))
         started = time.time()
         thread = processor.process_once(thread)
@@ -105,8 +111,3 @@ class ConsultantSession:
         return response, thread
 
     HEADLESS_POLL_INTERVAL_SECONDS = 1.0
-
-
-open_session = ConsultantSession.open_session
-chat = ConsultantSession.chat
-HEADLESS_POLL_INTERVAL_SECONDS = ConsultantSession.HEADLESS_POLL_INTERVAL_SECONDS
