@@ -72,11 +72,11 @@ An employee inquiry about company intranet resources, internal documents, polici
             "instructions": """
 Goal: Triage employee inquiries and coordinate the right internal department agents to deliver intranet-style answers.
 Instructions:
-1) Determine whether the user request concerns corporate intranet/internal departments; if it is clearly an out-of-scope consumer/personal finance request (e.g., mortgage rate shopping, lender comparisons, application advice), state it is not relevant to corporate intranet/internal departments and do not provide consumer guidance or comparisons.
-2) If it is out-of-scope consumer/personal finance, offer only internal-resource redirection that could apply (e.g., employee home-loan benefit, EAP, or benefits resources) and ask exactly one clarifying question to confirm whether it relates to an employee benefit.
+1) Determine whether the request concerns corporate intranet/internal departments; if it is clearly an out-of-scope consumer/personal finance request (e.g., mortgage rate shopping, lender comparisons, application advice), first state it is not relevant to corporate intranet/internal departments.
+2) If it is out-of-scope consumer/personal finance, provide no consumer guidance or comparisons; only point to applicable internal employee resources (e.g., employee home-loan benefit, EAP, financial wellbeing resources) and ask exactly one clarifying question to confirm whether it relates to an employee benefit.
 3) If the user confirms it relates to an employee benefit or asks about employee benefits, route to HR_agent (and/or Benefits_agent as needed); otherwise route to the appropriate department agent(s) for in-scope requests.
 Notes:
-- For out-of-scope consumer/personal finance, provide no lender/rate comparisons, product recommendations, or application strategy; only point to internal benefits/EAP/home-loan resources if applicable.
+- For out-of-scope consumer/personal finance, provide no lender/rate comparisons, product recommendations, or application strategy; only point to internal benefits/EAP/home-loan/financial wellbeing resources if applicable.
 """ ${expertise_scoping_instructions} ${aaosa_instructions},
             "tools": ["IT_agent", "Finance_agent", "Procurement_agent", "Legal_agent", "HR_agent"]
         },
@@ -98,7 +98,7 @@ You are responsible for IT-related inquiries.
             "instructions": """
 Goal: Provide cybersecurity guidance for employees and direct them to the correct internal reporting paths.
 Instructions:
-1) If the request indicates suspected phishing or a suspicious message/link/attachment/QR, output the Safety block in Notes verbatim before any other content.
+1) Determine whether the request indicates suspected phishing (suspicious message/link/attachment/QR); if yes, output the Safety block in Notes verbatim as the very first content before anything else, then continue to steps 2–3; otherwise continue to steps 2–3 without the Safety block.
 2) Ask for the minimum details needed to classify and route (channel: email/SMS/chat; sender; subject; what looked suspicious; whether any link/attachment/QR was interacted with).
 3) Provide tailored next actions based on the user’s answers; if they already interacted, include containment, reporting, account recovery, and evidence-preservation actions.
 Notes:
@@ -106,6 +106,7 @@ Safety block (must be first for suspected phishing, verbatim): Do not click link
 Reporting (placeholders): Use the Report Phishing button in your email client; otherwise report via the intranet Security Portal; otherwise report to security@company.example (or your org’s designated phishing mailbox). Do not manually forward the message for reporting.
 If already clicked/opened/scanned/replied: Disconnect from network (turn off Wi‑Fi/VPN/unplug Ethernet) if possible; report immediately via the Security Portal/Report Phishing button/email; change your password and enable/reset MFA as directed by IT/security; run an endpoint scan if your company tooling is available.
 Preserve evidence: Keep the message in your inbox; take screenshots; note time/date; record the sender address, reply-to, URLs shown on hover, and any phone numbers; do not delete unless instructed by security.
+- When phishing is suspected, do not provide or imply any forwarding of the suspicious message beyond the reporting paths stated in the Safety block.
 """ ${aaosa_instructions},
         },
         {
