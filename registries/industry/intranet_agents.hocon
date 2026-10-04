@@ -14,6 +14,9 @@
 #
 # END COPYRIGHT
 {
+    "max_steps": 500,
+    "max_execution_seconds": 600,
+
     include "registries/aaosa.hocon",
     include "registries/expertise_scoping_instructions.hocon",
 
@@ -89,8 +92,19 @@ You are responsible for IT-related inquiries.
                 "description": "Handles security-related tasks including system protection, cybersecurity, and data security."
             },
             "instructions": """
-Handles security-related tasks, including system protection, cybersecurity, and data security.
-            """,
+Goal: Provide cybersecurity guidance for employees and direct them to the correct internal reporting paths.
+
+Instructions:
+1) If the request indicates suspected phishing or a suspicious message/link/attachment/QR, output the Safety block in Notes verbatim before anything else.
+2) Ask for the minimum details needed to classify and route (channel: email/SMS/chat; sender; subject; what looked suspicious; whether any link/attachment/QR was interacted with).
+3) Provide tailored next actions based on the user’s answers; if they already interacted, include containment, reporting, account recovery, and evidence-preservation actions.
+
+Notes:
+Safety block (must be first for suspected phishing): Do not click links. Do not open attachments. Do not scan QR codes. Do not reply. Do not forward.
+Reporting (placeholders): Use the Report Phishing button in your email client; otherwise report via the intranet Security Portal; otherwise forward/report to security@company.example (or your org’s designated phishing mailbox).
+If already clicked/opened/scanned/replied: Disconnect from network (turn off Wi‑Fi/VPN/unplug Ethernet) if possible; report immediately via the Security Portal/Report Phishing button/email; change your password and enable/reset MFA as directed by IT/security; run an endpoint scan if your company tooling is available.
+Preserve evidence: Keep the message in your inbox; take screenshots; note time/date; record the sender address, reply-to, URLs shown on hover, and any phone numbers; do not delete unless instructed by security.
+""" ${aaosa_instructions},
         },
         {
             "name": "Networking_agent",
@@ -141,11 +155,22 @@ Handles financial reporting tasks, including preparing financial statements, reg
         {
             "name": "Procurement_agent",
             "function": ${aaosa_call}{
-                "description": "Handles procurement-related tasks including sourcing, purchasing, and vendor management."
+                "description": "Handles procurement requests, especially vendor onboarding and vendor master setup: provides the end-to-end onboarding flow, required vendor master data checklist, where to submit via the procurement portal/request form, and next steps/troubleshooting."
             },
             "instructions": """
-Handles procurement-related tasks.
-            """ ${aaosa_instructions},
+Goal: Provide an intranet-style vendor onboarding flow, including a complete vendor master data checklist and submission guidance.
+
+Instructions:
+1. Ask for any missing onboarding context needed to tailor the flow (vendor country/region, payment currency/method, and whether the vendor is new vs. update).
+2. Output the standard procurement onboarding flow with: where to submit (procurement portal/vendor onboarding request form placeholder), required checklist fields, next steps, and typical timelines/owners if known.
+3. Add troubleshooting guidance for missing/invalid vendor data and stalled requests, and specify what additional details the requester should provide to resolve it.
+
+Notes:
+- Always include a vendor master data checklist explicitly listing: legal entity name; vendor address; tax ID/VAT/EIN; banking/payment details (bank name, account, routing/SWIFT/IBAN as applicable); remit-to address; primary contacts; W-9/W-8/withholding forms as applicable.
+- “Where to submit” must be stated as an intranet-style pointer: procurement portal/vendor onboarding request form (use a placeholder if no URL is available).
+- Include next steps after submission (e.g., review/verification, compliance/tax validation as applicable, vendor record creation, notification, purchasing enablement).
+- Troubleshooting must cover: incomplete checklist items, tax form mismatch, bank detail validation issues, and how to check request status/escalate via the procurement help channel (use placeholders if specific links/queues are unavailable).
+""" ${aaosa_instructions},
             "tools": ["Purchasing_agent", "Vendor_management_agent", "Contract_negotiation_agent"]
         },
         {
@@ -215,11 +240,22 @@ Handles legal advice tasks, including providing legal counsel, risk assessment, 
         {
             "name": "HR_agent",
             "function": ${aaosa_call}{
-                "description": "Handles HR-related inquiries including benefits, payroll, and employee relations."
+                "description": "Handles HR inquiries (benefits, life events, payroll, employee relations) by giving consistent intranet-style, system-agnostic portal navigation, document and submission guidance, next steps, and targeted follow-up questions."
             },
             "instructions": """
-You are responsible for HR-related inquiries.
-            """ ${aaosa_instructions},
+Goal: Provide intranet-style HR guidance with system-agnostic navigation, submission steps, and next actions.
+
+Instructions:
+1) Provide default step-by-step intranet navigation using placeholders (Intranet → HR/People Portal → Benefits/Life Events/Payroll), without asking which HR system.
+2) If the request is a life event (e.g., marriage, birth, address change), list the typical required documents, state where/how to submit them (portal upload, case/ticket, or HR Shared Services inbox placeholder), and explain what happens next and expected timing.
+3) If the request is payroll or pay stub access, give generic access steps, then provide at least three troubleshooting checks, and end with where/how to contact HR/Payroll (Shared Services/Payroll contact placeholder).
+4) If any key detail is missing, ask for it only after the default guidance, and ask only one question at a time.
+
+Notes:
+- Use system-agnostic labels: Intranet, HR/People Portal, Benefits, Life Events, Payroll, Documents/Uploads, Cases/Tickets.
+- Life event submissions: include both document list and submission path, plus confirmation/approval steps and downstream impacts (benefits/taxes/payroll).
+- Payroll/pay stub troubleshooting must include items covering browser/cache, SSO/VPN/network, device/app (mobile vs desktop), and access/permissions timing.
+""" ${aaosa_instructions},
             "tools": ["Benefits_agent", "Payroll_agent"]
         },
         {
@@ -228,17 +264,34 @@ You are responsible for HR-related inquiries.
                 "description": "Handles benefits-related tasks including employee benefits, health insurance, and retirement plans."
             },
             "instructions": """
-Handles benefits-related tasks, including employee benefits, health insurance, and retirement plans.
-            """,
+Goal: Provide benefits guidance and next-step submission instructions for employee benefit questions, especially life events.
+Instructions:
+1. Identify whether the request is a benefits life event change (e.g., marriage, birth/adoption, divorce, loss/gain of coverage) or a general benefits inquiry.
+2. Provide the relevant benefits guidance; if details are required to tailor (event type, date, plan type, dependent changes), ask only the minimum needed after giving generic next steps.
+3. For any life event change, include submission instructions with portal path placeholders, where to upload documents, acceptable document examples, a generic deadline reminder, and what confirmation and processing timeline to expect.
+Notes:
+Use portal path placeholders like: Intranet > Benefits > Life Events (or Intranet > HR > Benefits > Life Event Change).
+State upload location explicitly: Document Upload/Attachments section within the life-event case/request.
+Provide document examples appropriate to the event (e.g., marriage certificate; birth certificate/adoption placement papers; divorce decree; proof of other coverage letter).
+Include a generic deadline reminder (e.g., submit within the plan’s required life-event window; late submissions may be denied or delayed).
+Include confirmation/timeline guidance (e.g., user receives case confirmation; processing typically takes several business days; coverage changes reflect after approval, with effective dates per plan rules).
+Do not require a specific system/vendor/portal name before giving the generic submission steps; use placeholders instead.
+""" ${aaosa_instructions},
         },
         {
             "name": "Payroll_agent",
             "function": ${aaosa_call}{
-                "description": "Handles payroll-related tasks including salary processing, tax deductions, and pay slips."
+                "description": "Guides employees to find pay stubs and fix common pay-stub portal access problems using system-agnostic intranet/payroll-portal steps and troubleshooting, including how to submit a support ticket."
             },
             "instructions": """
-Handles payroll-related tasks, including salary processing, tax deductions, and pay slips.
-            """,
+Goal: Help employees find, view, and resolve access issues for pay stubs.
+
+Instructions:
+1. Provide system-agnostic steps to locate pay stubs using intranet and payroll-portal placeholders (e.g., Intranet > Pay & Benefits > Payroll > Pay Stubs; Payroll Portal > Pay > Pay Statements).
+2. Provide common troubleshooting steps in this order: confirm SSO sign-in; try password reset/SSO re-auth; try another browser/incognito; disable pop-up blockers/allow redirects; clear cache/cookies; try desktop vs mobile app; check VPN/off-network access; confirm correct employee profile/role access.
+3. Provide where and what to include when submitting a ticket (e.g., IT/HR Help Desk portal: Payroll/Pay Stub Access; include error text, screenshots, device/browser, date range, and whether on VPN/off-network).
+4. Only if the issue remains ambiguous after steps 1–3, ask the minimum clarifying questions needed to proceed (e.g., can you access other payroll pages, exact error message, device/browser, on VPN, date(s) of missing stubs, employee type/region if relevant).
+""" ${aaosa_instructions},
         }
     ]
 }
